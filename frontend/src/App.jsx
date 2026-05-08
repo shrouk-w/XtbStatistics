@@ -88,17 +88,30 @@ function buildSystemEvents(series) {
   const peak = series.reduce((best, point) =>
     Number(point.totalValue) > Number(best.totalValue) ? point : best
   );
-  const trough = series.reduce((best, point) =>
-    Number(point.totalValue) < Number(best.totalValue) ? point : best
+  
+  const profitPeak = series.reduce((best, point) =>
+    Number(point.profitValue) > Number(best.profitValue) ? point : best
+  );
+  const profitTrough = series.reduce((best, point) =>
+    Number(point.profitValue) < Number(best.profitValue) ? point : best
   );
 
-  let biggestMove = null;
+  let biggestProfitJump = null;
+  let biggestProfitDrop = null;
+
   for (let index = 1; index < series.length; index += 1) {
-    const previous = Number(series[index - 1].totalValue) || 0;
-    const current = Number(series[index].totalValue) || 0;
+    const previous = Number(series[index - 1].profitValue) || 0;
+    const current = Number(series[index].profitValue) || 0;
     const change = current - previous;
-    if (!biggestMove || Math.abs(change) > Math.abs(biggestMove.change)) {
-      biggestMove = { date: series[index].date, change };
+    
+    if (change > 0) {
+      if (!biggestProfitJump || change > biggestProfitJump.change) {
+        biggestProfitJump = { date: series[index].date, change };
+      }
+    } else if (change < 0) {
+      if (!biggestProfitDrop || change < biggestProfitDrop.change) {
+        biggestProfitDrop = { date: series[index].date, change };
+      }
     }
   }
 
@@ -111,18 +124,34 @@ function buildSystemEvents(series) {
       source: "system",
     },
     {
-      key: "trough",
-      date: trough.date,
-      title: "Portfolio low",
-      value: formatPln(trough.totalValue),
+      key: "profit-peak",
+      date: profitPeak.date,
+      title: "Profit high",
+      value: formatPln(profitPeak.profitValue),
       source: "system",
     },
-    biggestMove
+    {
+      key: "profit-trough",
+      date: profitTrough.date,
+      title: "Profit low",
+      value: formatPln(profitTrough.profitValue),
+      source: "system",
+    },
+    biggestProfitJump
       ? {
-          key: "move",
-          date: biggestMove.date,
-          title: biggestMove.change >= 0 ? "Largest daily jump" : "Largest daily drawdown",
-          value: formatPln(biggestMove.change),
+          key: "profit-jump",
+          date: biggestProfitJump.date,
+          title: "Largest profit jump",
+          value: formatPln(biggestProfitJump.change),
+          source: "system",
+        }
+      : null,
+    biggestProfitDrop
+      ? {
+          key: "profit-drop",
+          date: biggestProfitDrop.date,
+          title: "Largest profit drop",
+          value: formatPln(biggestProfitDrop.change),
           source: "system",
         }
       : null,
