@@ -80,14 +80,24 @@ function parseCustomEvents(input) {
     .filter(Boolean);
 }
 
-function buildSystemEvents(series) {
-  if (!series.length) {
-    return [];
-  }
-
+function buildPortfolioEvents(series) {
+  if (!series.length) return [];
   const peak = series.reduce((best, point) =>
     Number(point.totalValue) > Number(best.totalValue) ? point : best
   );
+  return [
+    {
+      key: "peak",
+      date: peak.date,
+      title: "Portfolio high",
+      value: formatPln(peak.totalValue),
+      source: "system",
+    },
+  ];
+}
+
+function buildProfitEvents(series) {
+  if (!series.length) return [];
   
   const profitPeak = series.reduce((best, point) =>
     Number(point.profitValue) > Number(best.profitValue) ? point : best
@@ -116,13 +126,6 @@ function buildSystemEvents(series) {
   }
 
   return [
-    {
-      key: "peak",
-      date: peak.date,
-      title: "Portfolio high",
-      value: formatPln(peak.totalValue),
-      source: "system",
-    },
     {
       key: "profit-peak",
       date: profitPeak.date,
@@ -473,15 +476,27 @@ export function App() {
     }
     return benchmarks;
   }, [data, startDate, endDate]);
-  const systemEvents = useMemo(() => buildSystemEvents(visibleSeries), [visibleSeries]);
+
+  const portfolioEvents = useMemo(() => buildPortfolioEvents(visibleSeries), [visibleSeries]);
+  const profitEvents = useMemo(() => buildProfitEvents(visibleSeries), [visibleSeries]);
   const customEvents = useMemo(() => parseCustomEvents(customEventsText), [customEventsText]);
-  const visibleEvents = useMemo(
+
+  const visiblePortfolioEvents = useMemo(
     () =>
-      [...systemEvents, ...customEvents].filter((event) =>
+      [...portfolioEvents, ...customEvents].filter((event) =>
         visibleSeries.some((point) => point.date === event.date)
       ),
-    [systemEvents, customEvents, visibleSeries]
+    [portfolioEvents, customEvents, visibleSeries]
   );
+
+  const visibleProfitEvents = useMemo(
+    () =>
+      profitEvents.filter((event) =>
+        visibleSeries.some((point) => point.date === event.date)
+      ),
+    [profitEvents, visibleSeries]
+  );
+
   const stats = useMemo(
     () => buildStats(visibleSeries),
     [visibleSeries]
@@ -596,7 +611,7 @@ export function App() {
                 series={visibleSeries}
                 benchmarks={visibleBenchmarks}
                 activeBenchmarks={activeBenchmarks}
-                events={visibleEvents}
+                events={visiblePortfolioEvents}
                 valueKey="totalValue"
                 benchmarkValueKey="value"
                 valueLabel="Portfolio value"
@@ -607,7 +622,7 @@ export function App() {
               <div className="panelHead compact">
                 <div>
                   <span>Event feed</span>
-                  <h2>Dates to pin</h2>
+                  <h2>Portfolio milestones</h2>
                 </div>
               </div>
               <textarea
@@ -616,8 +631,8 @@ export function App() {
                 placeholder={"2024-02-01 | Fed decision\n2025-08-12 | Big rebalance"}
               />
               <div className="eventList">
-                {visibleEvents.length ? (
-                  visibleEvents.map((event) => (
+                {visiblePortfolioEvents.length ? (
+                  visiblePortfolioEvents.map((event) => (
                     <article key={event.key}>
                       <time>{formatDate(event.date)}</time>
                       <strong>{event.title}</strong>
@@ -631,22 +646,45 @@ export function App() {
             </aside>
           </section>
 
-          <section className="profitPanel">
-            <div className="panelHead compact">
-              <div>
-                <span>Clean performance</span>
-                <h2>Profit curve without deposit jumps</h2>
+          <section className="workbench profitSection">
+            <div className="chartPanel">
+              <div className="panelHead compact">
+                <div>
+                  <span>Clean performance</span>
+                  <h2>Profit curve (Zysk/Strata)</h2>
+                </div>
               </div>
+              <PortfolioChart
+                series={visibleSeries}
+                benchmarks={visibleBenchmarks}
+                activeBenchmarks={activeBenchmarks}
+                events={visibleProfitEvents}
+                valueKey="profitValue"
+                benchmarkValueKey="profitValue"
+                valueLabel="Profit/Loss"
+              />
             </div>
-            <PortfolioChart
-              series={visibleSeries}
-              benchmarks={visibleBenchmarks}
-              activeBenchmarks={activeBenchmarks}
-              events={visibleEvents}
-              valueKey="profitValue"
-              benchmarkValueKey="profitValue"
-              valueLabel="Portfolio P/L"
-            />
+            <aside className="sidePanel">
+              <div className="panelHead compact">
+                <div>
+                  <span>Profit feed</span>
+                  <h2>P/L Milestones</h2>
+                </div>
+              </div>
+              <div className="eventList">
+                {visibleProfitEvents.length ? (
+                  visibleProfitEvents.map((event) => (
+                    <article key={event.key}>
+                      <time>{formatDate(event.date)}</time>
+                      <strong>{event.title}</strong>
+                      {event.value ? <span>{event.value}</span> : null}
+                    </article>
+                  ))
+                ) : (
+                  <p>No profit events inside range.</p>
+                )}
+              </div>
+            </aside>
           </section>
 
           <section className="lowerGrid">
