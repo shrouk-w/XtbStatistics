@@ -266,6 +266,8 @@ function PortfolioChart({
   valueKey = "totalValue",
   benchmarkValueKey = "value",
   valueLabel = "Portfolio",
+  showZeroLine = true,
+  startAtZero = false,
 }) {
   const width = 1120;
   const height = 420;
@@ -292,10 +294,20 @@ function PortfolioChart({
       benchmark.series.map((point) => Number(point[benchmarkValueKey]) || 0)
     ),
   ];
-  const minValue = allValues.length ? Math.min(...allValues) : 0;
-  const maxValue = allValues.length ? Math.max(...allValues) : 1;
-  const range = (maxValue - minValue) * 1.1 || 1; // Add 10% headroom
-  const floor = minValue - (maxValue - minValue) * 0.05;
+  const rawMin = allValues.length ? Math.min(...allValues) : 0;
+  const rawMax = allValues.length ? Math.max(...allValues) : 1;
+  const rawRange = rawMax - rawMin;
+  const paddingVal = rawRange * 0.05 || 100;
+  
+  let floor = startAtZero ? 0 : Math.floor((rawMin - paddingVal) / 1000) * 1000;
+  let ceil = Math.ceil((rawMax + paddingVal) / 1000) * 1000;
+  let range = (ceil - floor) || 4000;
+  
+  // Adjust range to be multiple of 4000 for "nice" 25% steps
+  if (range % 4000 !== 0) {
+    range = Math.ceil(range / 4000) * 4000;
+    ceil = floor + range;
+  }
 
   function toPoint(point, index, length, pointValueKey = valueKey) {
     const x = padding + (index / Math.max(length - 1, 1)) * (width - padding * 2);
@@ -324,6 +336,9 @@ function PortfolioChart({
     onHover(index);
   }
 
+  const zeroY = height - padding - ((0 - floor) / range) * (height - padding * 2);
+  const reallyShowZeroLine = showZeroLine && floor < 0 && ceil > 0;
+
   return (
     <div className="chartShell">
       <svg
@@ -343,6 +358,32 @@ function PortfolioChart({
             </g>
           );
         })}
+
+        {/* Zero Line */}
+        {reallyShowZeroLine && (
+          <g key="zero-line">
+            <line
+              x1={padding}
+              x2={width - padding}
+              y1={zeroY}
+              y2={zeroY}
+              stroke="#ff4d4d"
+              strokeWidth="1.5"
+              strokeDasharray="6 3"
+              opacity="0.8"
+            />
+            <text
+              x={padding - 10}
+              y={zeroY + 4}
+              textAnchor="end"
+              fill="#ff4d4d"
+              fontSize="11"
+              fontWeight="bold"
+            >
+              0,00 zł
+            </text>
+          </g>
+        )}
 
         {/* X Grid & Labels (Dates) */}
         {series.length > 1 && [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
@@ -670,6 +711,8 @@ export function App() {
                 valueKey="totalValue"
                 benchmarkValueKey="value"
                 valueLabel="Portfolio value"
+                showZeroLine={false}
+                startAtZero={startDate === data?.summary?.startDate}
               />
             </div>
 
