@@ -22,7 +22,7 @@ from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
 from .database import get_db, init_db
-from .models import CashOperation, ClosedPosition, OpenPosition
+from .models import CashOperation, ClosedPosition, OpenPosition, PendingOrder
 
 COMMENT_RE = re.compile(
     r"(?:OPEN|CLOSE) BUY (?P<quantity>\d+(?:\.\d+)?)(?:/(?P<total>\d+(?:\.\d+)?))? @ (?P<price>\d+(?:\.\d+)?)"
@@ -100,6 +100,7 @@ def create_app() -> FastAPI:
     async def get_portfolio(db: Session = Depends(get_db)) -> dict[str, Any]:
         # Fetch from DB
         db_cash = db.query(CashOperation).all()
+        db_pending = db.query(PendingOrder).all()
         
         cash_events: list[CashEvent] = []
         external_cash_events: list[tuple[date, float]] = []
@@ -131,6 +132,13 @@ def create_app() -> FastAPI:
                             trade_date=event_date,
                         )
                     )
+
+        # Include Pending Orders Margin as tied up cash (negative impact on available cash)
+        for order in db_pending:
+            if order.margin:
+                event_date = order.open_time.date()
+                # Assuming margin is positive in DB, it subtracts from available cash
+                cash_events.append(CashEvent(event_date=event_date, amount=-float(order.margin), operation_type="Pending Order Margin"))
 
         if not cash_events and not position_events:
             print("DEBUG: No data found in database.")
@@ -249,6 +257,29 @@ def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
                     trade_date=event_date,
                 )
             )
+
+    # Process Pending Orders if sheet exists
+    pending_sheet_name = next((s for s in workbook.sheetnames if "PENDING ORDERS" in s.upper()), None)
+    if pending_sheet_name:
+        sheet = workbook[pending_sheet_name]
+        # XTB Excel structure for Pending Orders usually has headers at row 8, data starts at row 9
+        for row in sheet.iter_rows(min_row=9, values_only=True):
+            if not row or row[0] is None:
+                continue
+            
+            try:
+                # Margin is typically at column F (index 5)
+                # Open time is typically at column M (index 12)
+                margin = float(row[5]) if row[5] is not None else 0.0
+                open_time = row[12]
+                if margin > 0 and isinstance(open_time, datetime):
+                    cash_events.append(CashEvent(
+                        event_date=open_time.date(),
+                        amount=-margin,
+                        operation_type="Pending Order Margin"
+                    ))
+            except (ValueError, TypeError, IndexError):
+                continue
 
     return {
         "cash_events": cash_events,
