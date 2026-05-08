@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const BENCHMARK_COLORS = {
   sp500: "#4fd1ff",
   nasdaq: "#b78cff",
@@ -406,6 +406,28 @@ export function App() {
   const [endDate, setEndDate] = useState("");
   const [customEventsText, setCustomEventsText] = useState("");
   const [activeBenchmarks, setActiveBenchmarks] = useState({ sp500: true, gold: true });
+
+  useEffect(() => {
+    async function loadPortfolio() {
+      setLoading(true);
+      try {
+        const response = await fetch(`${API_BASE}/api/portfolio`);
+        if (response.ok) {
+          const payload = await response.json();
+          if (payload.series && payload.series.length > 0) {
+            setData(payload);
+            setStartDate(payload.summary.startDate);
+            setEndDate(payload.summary.endDate);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load portfolio from DB", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadPortfolio();
+  }, []);
 
   const series = data?.series ?? [];
   const visibleSeries = useMemo(

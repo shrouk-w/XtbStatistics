@@ -14,12 +14,15 @@ from typing import Any
 import pandas as pd
 import httpx
 import yfinance as yf
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
+from sqlalchemy.orm import Session
 
+from .database import get_db, init_db
+from .models import CashOperation, ClosedPosition, OpenPosition
 
 COMMENT_RE = re.compile(
     r"(?:OPEN|CLOSE) BUY (?P<quantity>\d+(?:\.\d+)?)(?:/(?P<total>\d+(?:\.\d+)?))? @ (?P<price>\d+(?:\.\d+)?)"
@@ -79,6 +82,7 @@ class CashEvent:
 
 
 def create_app() -> FastAPI:
+    init_db()
     app = FastAPI(title="XTB Portfolio History")
     app.add_middleware(
         CORSMiddleware,
@@ -91,6 +95,49 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/portfolio")
+    async def get_portfolio(db: Session = Depends(get_db)) -> dict[str, Any]:
+        # Fetch from DB
+        db_cash = db.query(CashOperation).all()
+        
+        cash_events: list[CashEvent] = []
+        external_cash_events: list[tuple[date, float]] = []
+        trade_cash_events: list[tuple[date, float]] = []
+        position_events: list[PositionEvent] = []
+
+        for op in db_cash:
+            event_date = op.time.date()
+            cash_events.append(CashEvent(event_date=event_date, amount=op.amount, operation_type=op.operation_type))
+            
+            # Normalize operation types from DB
+            op_type_raw = str(op.operation_type or "").strip().lower()
+            
+            if op_type_raw in {"stock purchase", "stock sale", "stock sell"}:
+                trade_cash_events.append((event_date, op.amount))
+            elif is_external_cash_operation(op_type_raw):
+                external_cash_events.append((event_date, op.amount))
+            
+            # If it's a purchase/sell, we need quantity deltas
+            if op_type_raw in {"stock purchase", "stock sale", "stock sell"}:
+                quantity = extract_quantity(op.comment)
+                if quantity:
+                    delta = quantity if op_type_raw == "stock purchase" else -quantity
+                    position_events.append(
+                        PositionEvent(
+                            ticker=op.symbol,
+                            yahoo_ticker=to_yahoo_symbol(op.symbol),
+                            quantity_delta=delta,
+                            trade_date=event_date,
+                        )
+                    )
+
+        if not cash_events and not position_events:
+            print("DEBUG: No data found in database.")
+            return {"summary": {}, "series": [], "holdings": [], "benchmarks": {}, "warnings": ["No data in database."]}
+
+        portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events)
+        return portfolio
 
     @app.post("/api/portfolio/analyze")
     async def analyze_portfolio(files: list[UploadFile] = File(...)) -> dict[str, Any]:
@@ -171,7 +218,7 @@ def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
         cash_amount = float(amount)
         cash_events.append(CashEvent(event_date=event_date, amount=cash_amount, operation_type=operation_type))
 
-        if operation_type in {"Stock purchase", "Stock sell"}:
+        if operation_type in {"Stock purchase", "Stock sale", "Stock sell"}:
             trade_cash_events.append((event_date, cash_amount))
         elif is_external_cash_operation(operation_type):
             external_cash_events.append((event_date, cash_amount))
@@ -189,7 +236,7 @@ def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
                     trade_date=event_date,
                 )
             )
-        elif operation_type == "Stock sell":
+        elif operation_type in {"Stock sale", "Stock sell"}:
             quantity = extract_quantity(comment)
             if quantity is None:
                 warnings.append(f"{filename}: could not parse quantity from comment '{comment}'.")
@@ -214,7 +261,14 @@ def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
 
 def is_external_cash_operation(operation_type: str) -> bool:
     normalized = operation_type.lower()
-    return any(keyword in normalized for keyword in ["deposit", "withdrawal", "transfer"])
+    # "Deposit" or "Withdrawal" or "Transfer" usually means external.
+    # Exclude "Stock purchase" and "Stock sale" which are trades.
+    # Exclude "DIVIDENT" and "Interest" which are internal earnings.
+    if any(trade in normalized for trade in ["stock purchase", "stock sale", "stock sell", "trade"]):
+        return False
+    if any(earning in normalized for earning in ["divident", "interest"]):
+        return False
+    return any(keyword in normalized for keyword in ["deposit", "withdrawal", "transfer", "wplata", "wyplata"])
 
 
 def to_yahoo_symbol(xtb_ticker: str) -> str:
