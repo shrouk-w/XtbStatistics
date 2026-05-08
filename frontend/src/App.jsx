@@ -314,7 +314,8 @@ function PortfolioChart({
     }
 
     const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    const localX = (event.clientX - rect.left) * (width / rect.width);
+    const ratio = clamp((localX - padding) / (width - padding * 2), 0, 1);
     const index = Math.round(ratio * (chartPoints.length - 1));
     setHoverIndex(index);
   }
@@ -322,6 +323,8 @@ function PortfolioChart({
   function handleMouseLeave() {
     setHoverIndex(null);
   }
+
+  const tooltipSide = hoverPoint ? (hoverPoint.x > width / 2 ? { left: 14, right: "auto" } : { right: 14, left: "auto" }) : {};
 
   return (
     <div className="chartShell">
@@ -381,7 +384,7 @@ function PortfolioChart({
       </svg>
 
       {hoverPoint ? (
-        <div className="chartTooltip">
+        <div className="chartTooltip" style={{ ...tooltipSide, pointerEvents: "none" }}>
           <strong>{formatDate(hoverPoint.date)}</strong>
           <span>{valueLabel} {formatPln(hoverPoint[valueKey])}</span>
           <span>Cash {formatPln(hoverPoint.cash)}</span>
