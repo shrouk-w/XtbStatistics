@@ -405,7 +405,7 @@ function PortfolioChart({
           <path key={benchmark.key} d={linePath(benchmark.points)} fill="none" stroke={benchmark.color} strokeWidth="1.5" opacity="0.6" />
         ))}
 
-        <path d={linePath(chartPoints)} fill="none" stroke="#4fd1ff" strokeWidth="3" />
+        <path d={linePath(chartPoints)} fill="none" stroke="#ffffff" strokeWidth="3" />
 
         {events.map((event) => {
           const idx = series.findIndex((p) => p.date === event.date);
@@ -433,7 +433,15 @@ function PortfolioChart({
   );
 }
 
-function LiveTooltip({ hoverPoint, benchmarks, visibleSeries, valueKey, valueLabel, activeBenchmarks }) {
+function LiveTooltip({ 
+  hoverPoint, 
+  benchmarks, 
+  visibleSeries, 
+  valueKey, 
+  valueLabel, 
+  activeBenchmarks,
+  benchmarkValueKey = "value"
+}) {
   const displayPoint = hoverPoint || (visibleSeries && visibleSeries.length > 0 ? visibleSeries[visibleSeries.length - 1] : null);
 
   if (!displayPoint) {
@@ -471,7 +479,7 @@ function LiveTooltip({ hoverPoint, benchmarks, visibleSeries, valueKey, valueLab
             <div key={b.key} className="tipBenchRow">
                 <span className="dot" style={{ background: BENCHMARK_COLORS[b.key] }} />
                 <span className="label">{b.label}</span>
-                <strong>{formatPln(b.current.value)}</strong>
+                <strong>{formatPln(b.current[benchmarkValueKey])}</strong>
             </div>
         )) : <span className="noBenchmarks">Toggle benchmarks to compare</span>}
       </div>
@@ -513,11 +521,20 @@ export function App() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
+
+  // Portfolio Chart State
+  const [portfolioStart, setPortfolioStart] = useState("");
+  const [portfolioEnd, setPortfolioEnd] = useState("");
+  const [portfolioBenchmarks, setPortfolioBenchmarks] = useState({ sp500: true, gold: true });
+  const [portfolioHover, setPortfolioHover] = useState(null);
+
+  // Profit Chart State
+  const [profitStart, setProfitStart] = useState("");
+  const [profitEnd, setProfitEnd] = useState("");
+  const [profitBenchmarks, setProfitBenchmarks] = useState({ sp500: false, gold: false });
+  const [profitHover, setProfitHover] = useState(null);
+
   const [customEventsText, setCustomEventsText] = useState("");
-  const [activeBenchmarks, setActiveBenchmarks] = useState({ sp500: true, gold: true });
-  const [hoverIndex, setHoverIndex] = useState(null);
 
   useEffect(() => {
     async function loadPortfolio() {
@@ -528,8 +545,10 @@ export function App() {
           const payload = await response.json();
           if (payload.series && payload.series.length > 0) {
             setData(payload);
-            setStartDate(payload.summary.startDate);
-            setEndDate(payload.summary.endDate);
+            setPortfolioStart(payload.summary.startDate);
+            setPortfolioEnd(payload.summary.endDate);
+            setProfitStart(payload.summary.startDate);
+            setProfitEnd(payload.summary.endDate);
           }
         }
       } catch (err) {
@@ -542,44 +561,62 @@ export function App() {
   }, []);
 
   const series = data?.series ?? [];
-  const visibleSeries = useMemo(
-    () => filterByDate(series, startDate, endDate),
-    [series, startDate, endDate]
+
+  // Derived Portfolio Data
+  const visiblePortfolioSeries = useMemo(
+    () => filterByDate(series, portfolioStart, portfolioEnd),
+    [series, portfolioStart, portfolioEnd]
   );
-  const visibleBenchmarks = useMemo(() => {
+  const visiblePortfolioBenchmarks = useMemo(() => {
     const benchmarks = {};
     for (const [key, benchmark] of Object.entries(data?.benchmarks ?? {})) {
       benchmarks[key] = {
         ...benchmark,
-        series: filterByDate(benchmark.series, startDate, endDate),
+        series: filterByDate(benchmark.series, portfolioStart, portfolioEnd),
       };
     }
     return benchmarks;
-  }, [data, startDate, endDate]);
+  }, [data, portfolioStart, portfolioEnd]);
 
-  const portfolioEvents = useMemo(() => buildPortfolioEvents(visibleSeries), [visibleSeries]);
-  const profitEvents = useMemo(() => buildProfitEvents(visibleSeries), [visibleSeries]);
+  // Derived Profit Data
+  const visibleProfitSeries = useMemo(
+    () => filterByDate(series, profitStart, profitEnd),
+    [series, profitStart, profitEnd]
+  );
+  const visibleProfitBenchmarksData = useMemo(() => {
+    const benchmarks = {};
+    for (const [key, benchmark] of Object.entries(data?.benchmarks ?? {})) {
+      benchmarks[key] = {
+        ...benchmark,
+        series: filterByDate(benchmark.series, profitStart, profitEnd),
+      };
+    }
+    return benchmarks;
+  }, [data, profitStart, profitEnd]);
+
+  const portfolioEvents = useMemo(() => buildPortfolioEvents(visiblePortfolioSeries), [visiblePortfolioSeries]);
+  const profitEvents = useMemo(() => buildProfitEvents(visibleProfitSeries), [visibleProfitSeries]);
   const customEvents = useMemo(() => parseCustomEvents(customEventsText), [customEventsText]);
 
   const visiblePortfolioEvents = useMemo(
     () =>
       [...portfolioEvents, ...customEvents].filter((event) =>
-        visibleSeries.some((point) => point.date === event.date)
+        visiblePortfolioSeries.some((point) => point.date === event.date)
       ),
-    [portfolioEvents, customEvents, visibleSeries]
+    [portfolioEvents, customEvents, visiblePortfolioSeries]
   );
 
   const visibleProfitEvents = useMemo(
     () =>
       profitEvents.filter((event) =>
-        visibleSeries.some((point) => point.date === event.date)
+        visibleProfitSeries.some((point) => point.date === event.date)
       ),
-    [profitEvents, visibleSeries]
+    [profitEvents, visibleProfitSeries]
   );
 
   const stats = useMemo(
-    () => buildStats(visibleSeries),
-    [visibleSeries]
+    () => buildStats(visiblePortfolioSeries),
+    [visiblePortfolioSeries]
   );
 
   async function handleSubmit(event) {
@@ -606,8 +643,10 @@ export function App() {
       }
       const payload = await response.json();
       setData(payload);
-      setStartDate(payload.summary.startDate);
-      setEndDate(payload.summary.endDate);
+      setPortfolioStart(payload.summary.startDate);
+      setPortfolioEnd(payload.summary.endDate);
+      setProfitStart(payload.summary.startDate);
+      setProfitEnd(payload.summary.endDate);
     } catch (submitError) {
       setError(submitError.message || "Wystapil blad podczas wysylki.");
       setData(null);
@@ -616,11 +655,8 @@ export function App() {
     }
   }
 
-  function toggleBenchmark(key) {
-    setActiveBenchmarks((current) => ({ ...current, [key]: !current[key] }));
-  }
-
-  const hoverPoint = hoverIndex !== null ? visibleSeries[hoverIndex] : null;
+  const portfolioHoverPoint = portfolioHover !== null ? visiblePortfolioSeries[portfolioHover] : null;
+  const profitHoverPoint = profitHover !== null ? visibleProfitSeries[profitHover] : null;
 
   return (
     <main className="appShell">
@@ -646,7 +682,7 @@ export function App() {
         <div className="metricPanel">
           <span>Portfolio value</span>
           <strong>{formatPln(stats.current || data?.summary?.currentTotalValue || 0)}</strong>
-          <small>{visibleSeries.length ? `${formatDate(visibleSeries[0].date)} - ${formatDate(visibleSeries.at(-1).date)}` : "Upload XTB XLSX"}</small>
+          <small>{visiblePortfolioSeries.length ? `${formatDate(visiblePortfolioSeries[0].date)} - ${formatDate(visiblePortfolioSeries.at(-1).date)}` : "Upload XTB XLSX"}</small>
         </div>
         <div className="metricPanel">
           <span>Net deposits</span>
@@ -678,41 +714,42 @@ export function App() {
                 </div>
                 <RangeControls
                   data={data}
-                  startDate={startDate}
-                  endDate={endDate}
-                  onStartDate={setStartDate}
-                  onEndDate={setEndDate}
+                  startDate={portfolioStart}
+                  endDate={portfolioEnd}
+                  onStartDate={setPortfolioStart}
+                  onEndDate={setPortfolioEnd}
                 />
               </div>
 
               <div className="chartActionsRow">
                 <BenchmarkToggles
                   benchmarks={data.benchmarks}
-                  active={activeBenchmarks}
-                  onToggle={toggleBenchmark}
+                  active={portfolioBenchmarks}
+                  onToggle={(key) => setPortfolioBenchmarks(curr => ({ ...curr, [key]: !curr[key] }))}
                 />
                 <LiveTooltip 
-                    hoverPoint={hoverPoint} 
+                    hoverPoint={portfolioHoverPoint} 
                     benchmarks={data.benchmarks} 
-                    visibleSeries={visibleSeries} 
+                    visibleSeries={visiblePortfolioSeries} 
                     valueKey="totalValue" 
                     valueLabel="Portfolio" 
-                    activeBenchmarks={activeBenchmarks}
+                    activeBenchmarks={portfolioBenchmarks}
+                    benchmarkValueKey="value"
                 />
               </div>
 
               <PortfolioChart
-                series={visibleSeries}
-                benchmarks={visibleBenchmarks}
-                activeBenchmarks={activeBenchmarks}
+                series={visiblePortfolioSeries}
+                benchmarks={visiblePortfolioBenchmarks}
+                activeBenchmarks={portfolioBenchmarks}
                 events={visiblePortfolioEvents}
-                hoverIndex={hoverIndex}
-                onHover={setHoverIndex}
+                hoverIndex={portfolioHover}
+                onHover={setPortfolioHover}
                 valueKey="totalValue"
                 benchmarkValueKey="value"
                 valueLabel="Portfolio value"
                 showZeroLine={false}
-                startAtZero={startDate === data?.summary?.startDate}
+                startAtZero={portfolioStart === data?.summary?.startDate}
               />
             </div>
 
@@ -751,27 +788,39 @@ export function App() {
                   <span>Clean performance</span>
                   <h2>Profit curve (Zysk/Strata)</h2>
                 </div>
+                <RangeControls
+                  data={data}
+                  startDate={profitStart}
+                  endDate={profitEnd}
+                  onStartDate={setProfitStart}
+                  onEndDate={setProfitEnd}
+                />
               </div>
               
               <div className="chartActionsRow">
-                <div /> {/* Spacer */}
+                <BenchmarkToggles
+                  benchmarks={data.benchmarks}
+                  active={profitBenchmarks}
+                  onToggle={(key) => setProfitBenchmarks(curr => ({ ...curr, [key]: !curr[key] }))}
+                />
                 <LiveTooltip 
-                    hoverPoint={hoverPoint} 
+                    hoverPoint={profitHoverPoint} 
                     benchmarks={data.benchmarks} 
-                    visibleSeries={visibleSeries} 
+                    visibleSeries={visibleProfitSeries} 
                     valueKey="profitValue" 
                     valueLabel="Profit/Loss" 
-                    activeBenchmarks={activeBenchmarks}
+                    activeBenchmarks={profitBenchmarks}
+                    benchmarkValueKey="profitValue"
                 />
               </div>
 
               <PortfolioChart
-                series={visibleSeries}
-                benchmarks={visibleBenchmarks}
-                activeBenchmarks={activeBenchmarks}
+                series={visibleProfitSeries}
+                benchmarks={visibleProfitBenchmarksData}
+                activeBenchmarks={profitBenchmarks}
                 events={visibleProfitEvents}
-                hoverIndex={hoverIndex}
-                onHover={setHoverIndex}
+                hoverIndex={profitHover}
+                onHover={setProfitHover}
                 valueKey="profitValue"
                 benchmarkValueKey="profitValue"
                 valueLabel="Profit/Loss"
