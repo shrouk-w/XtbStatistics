@@ -163,20 +163,25 @@ function buildProfitEvents(series) {
 
 function buildStats(series) {
   if (!series.length) {
-    return { current: 0, returnPercent: 0, drawdownPercent: 0, investedPercent: 0 };
+    return { current: 0, returnPercent: 0, drawdownPercent: 0, investedPercent: 0, avgDepositProfitPercent: 0 };
   }
 
   const first = Number(series[0].totalValue) || 0;
   const lastPoint = series[series.length - 1];
   const last = Number(lastPoint.totalValue) || 0;
   const holdingsValue = Number(lastPoint.holdingsValue) || 0;
+  const profitValue = Number(lastPoint.profitValue) || 0;
   const peak = Math.max(...series.map((point) => Number(point.totalValue) || 0));
+  
+  const avgDeposit = series.reduce((sum, p) => sum + (Number(p.externalCashFlow) || 0), 0) / series.length;
+  const avgDepositProfitPercent = avgDeposit > 0 ? (profitValue / avgDeposit) * 100 : 0;
 
   return {
     current: last,
     returnPercent: first ? ((last - first) / first) * 100 : 0,
     drawdownPercent: peak ? ((last - peak) / peak) * 100 : 0,
     investedPercent: last ? ((Number(holdingsValue) || 0) / last) * 100 : 0,
+    avgDepositProfitPercent,
   };
 }
 
@@ -256,14 +261,15 @@ function PortfolioChart({
   benchmarks,
   activeBenchmarks,
   events,
+  hoverIndex,
+  onHover,
   valueKey = "totalValue",
   benchmarkValueKey = "value",
   valueLabel = "Portfolio",
 }) {
-  const [hoverIndex, setHoverIndex] = useState(null);
   const width = 1120;
   const height = 420;
-  const padding = 42;
+  const padding = 50; // Increased padding for axes
 
   if (!series.length) {
     return <div className="chartEmpty">No data in selected range.</div>;
@@ -288,14 +294,15 @@ function PortfolioChart({
   ];
   const minValue = allValues.length ? Math.min(...allValues) : 0;
   const maxValue = allValues.length ? Math.max(...allValues) : 1;
-  const range = maxValue - minValue || 1;
+  const range = (maxValue - minValue) * 1.1 || 1; // Add 10% headroom
+  const floor = minValue - (maxValue - minValue) * 0.05;
 
   function toPoint(point, index, length, pointValueKey = valueKey) {
     const x = padding + (index / Math.max(length - 1, 1)) * (width - padding * 2);
     const y =
       height -
       padding -
-      (((Number(point[pointValueKey]) || 0) - minValue) / range) * (height - padding * 2);
+      (((Number(point[pointValueKey]) || 0) - floor) / range) * (height - padding * 2);
     return { ...point, x, y };
   }
 
@@ -306,99 +313,127 @@ function PortfolioChart({
       toPoint(point, index, benchmark.series.length, benchmarkValueKey)
     ),
   }));
-  const hoverPoint = hoverIndex === null ? null : chartPoints[hoverIndex];
+  const hoverPoint = hoverIndex !== null && hoverIndex >= 0 && hoverIndex < chartPoints.length ? chartPoints[hoverIndex] : null;
 
   function handleMouseMove(event) {
-    if (!chartPoints.length) {
-      return;
-    }
-
+    if (!chartPoints.length) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const localX = (event.clientX - rect.left) * (width / rect.width);
     const ratio = clamp((localX - padding) / (width - padding * 2), 0, 1);
     const index = Math.round(ratio * (chartPoints.length - 1));
-    setHoverIndex(index);
+    onHover(index);
   }
-
-  function handleMouseLeave() {
-    setHoverIndex(null);
-  }
-
-  const tooltipSide = hoverPoint ? (hoverPoint.x > width / 2 ? { left: 14, right: "auto" } : { right: 14, left: "auto" }) : {};
 
   return (
     <div className="chartShell">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         className="chartSvg"
-        role="img"
-        aria-label="Portfolio chart"
         onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
+        onMouseLeave={() => onHover(null)}
       >
-        {[0.25, 0.5, 0.75].map((ratio) => {
-          const y = padding + (height - padding * 2) * ratio;
-          const value = maxValue - range * ratio;
+        {/* Y Grid & Labels */}
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+          const y = height - padding - (height - padding * 2) * ratio;
+          const val = floor + range * ratio;
           return (
-            <g key={ratio}>
-              <line x1={padding} x2={width - padding} y1={y} y2={y} className="gridLine" />
-              <text x={padding} y={y - 8} className="axisLabel">{formatPln(value)}</text>
+            <g key={`y-${ratio}`}>
+              <line x1={padding} x2={width - padding} y1={y} y2={y} stroke="rgba(255,255,255,0.1)" strokeDasharray="4 4" />
+              <text x={padding - 10} y={y + 4} textAnchor="end" fill="#8da2b8" fontSize="10">{formatPln(val)}</text>
             </g>
           );
         })}
+
+        {/* X Grid & Labels (Dates) */}
+        {series.length > 1 && [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+           const idx = Math.floor(ratio * (series.length - 1));
+           const point = chartPoints[idx];
+           return (
+             <g key={`x-${ratio}`}>
+               <line x1={point.x} x2={point.x} y1={padding} y2={height - padding} stroke="rgba(255,255,255,0.05)" />
+               <text x={point.x} y={height - padding + 20} textAnchor="middle" fill="#8da2b8" fontSize="10">{formatDate(point.date)}</text>
+             </g>
+           );
+        })}
+
+        {/* Main Axes */}
+        <line x1={padding} x2={padding} y1={padding} y2={height - padding} stroke="#25364c" />
+        <line x1={padding} x2={width - padding} y1={height - padding} y2={height - padding} stroke="#25364c" />
 
         {benchmarkPoints.map((benchmark) => (
-          <path
-            key={benchmark.key}
-            d={linePath(benchmark.points)}
-            className="benchmarkLine"
-            stroke={benchmark.color}
-          />
+          <path key={benchmark.key} d={linePath(benchmark.points)} fill="none" stroke={benchmark.color} strokeWidth="1.5" opacity="0.6" />
         ))}
 
-        <path d={linePath(chartPoints)} className="portfolioLine" />
+        <path d={linePath(chartPoints)} fill="none" stroke="#4fd1ff" strokeWidth="3" />
 
         {events.map((event) => {
-          const index = series.findIndex((point) => point.date === event.date);
-          if (index < 0) {
-            return null;
-          }
-          const point = chartPoints[index];
+          const idx = series.findIndex((p) => p.date === event.date);
+          if (idx < 0) return null;
+          const p = chartPoints[idx];
           return (
             <g key={event.key}>
-              <line x1={point.x} x2={point.x} y1={padding} y2={height - padding} className="eventLine" />
-              <circle cx={point.x} cy={point.y} r="5" className={`eventDot ${event.source}`} />
-              <text x={clamp(point.x + 8, padding, width - 150)} y={clamp(point.y - 10, padding, height - padding)} className="eventLabel">
-                {event.title}
-              </text>
+              <line x1={p.x} x2={p.x} y1={padding} y2={height - padding} stroke="#ffd166" strokeDasharray="2 2" opacity="0.5" />
+              <circle cx={p.x} cy={p.y} r="5" fill="#ffd166" stroke="#070b12" strokeWidth="2" />
+              <rect x={p.x + 6} y={p.y - 20} width="80" height="16" rx="4" fill="rgba(7,11,18,0.8)" />
+              <text x={p.x + 10} y={p.y - 8} fill="#ffd166" fontSize="9" fontWeight="bold">{event.title}</text>
             </g>
           );
         })}
 
-        {hoverPoint ? (
+        {hoverPoint && (
           <g>
-            <line x1={hoverPoint.x} x2={hoverPoint.x} y1={padding} y2={height - padding} className="hoverLine" />
-            <circle cx={hoverPoint.x} cy={hoverPoint.y} r="6" className="hoverDot" />
+            <line x1={hoverPoint.x} x2={hoverPoint.x} y1={padding} y2={height - padding} stroke="#4fd1ff" strokeDasharray="4 2" />
+            <circle cx={hoverPoint.x} cy={hoverPoint.y} r="7" fill="#4fd1ff" stroke="#fff" strokeWidth="2" />
+            <circle cx={hoverPoint.x} cy={hoverPoint.y} r="12" fill="#4fd1ff" opacity="0.2" />
           </g>
-        ) : null}
+        )}
       </svg>
+    </div>
+  );
+}
 
-      {hoverPoint ? (
-        <div className="chartTooltip" style={{ ...tooltipSide, pointerEvents: "none" }}>
-          <strong>{formatDate(hoverPoint.date)}</strong>
-          <span>{valueLabel} {formatPln(hoverPoint[valueKey])}</span>
-          <span>Cash {formatPln(hoverPoint.cash)}</span>
-          <span>Holdings {formatPln(hoverPoint.holdingsValue)}</span>
-          {benchmarkPoints.map((benchmark) => {
-            const point = benchmark.series.find((item) => item.date === hoverPoint.date);
-            return point ? (
-              <span key={benchmark.key} style={{ color: benchmark.color }}>
-                {benchmark.label} {formatPln(point[benchmarkValueKey])}
-              </span>
-            ) : null;
-          })}
+function LiveTooltip({ hoverPoint, benchmarks, visibleSeries, valueKey, valueLabel, activeBenchmarks }) {
+  const displayPoint = hoverPoint || (visibleSeries && visibleSeries.length > 0 ? visibleSeries[visibleSeries.length - 1] : null);
+
+  if (!displayPoint) {
+    return <div className="liveTooltip placeholder">Waiting for portfolio data...</div>;
+  }
+
+  const activeBenchmarkSeries = Object.entries(benchmarks ?? {})
+    .filter(([key]) => activeBenchmarks[key])
+    .map(([key, benchmark]) => {
+        const point = benchmark.series.find(p => p.date === displayPoint.date);
+        return point ? { ...benchmark, current: point, key } : null;
+    }).filter(Boolean);
+
+  return (
+    <div className={`liveTooltip ${hoverPoint ? "active" : "default"}`}>
+      <div className="tipDate">
+        <span>{hoverPoint ? formatDate(displayPoint.date) : "Latest: " + formatDate(displayPoint.date)}</span>
+      </div>
+      <div className="tipContent">
+        <div className="tipGroup">
+            <label>{valueLabel}</label>
+            <strong>{formatPln(displayPoint[valueKey])}</strong>
         </div>
-      ) : null}
+        <div className="tipGroup">
+            <label>Cash</label>
+            <strong>{formatPln(displayPoint.cash)}</strong>
+        </div>
+        <div className="tipGroup">
+            <label>Holdings</label>
+            <strong>{formatPln(displayPoint.holdingsValue)}</strong>
+        </div>
+      </div>
+      <div className="tipBenchmarks">
+        {activeBenchmarkSeries.length > 0 ? activeBenchmarkSeries.map(b => (
+            <div key={b.key} className="tipBenchRow">
+                <span className="dot" style={{ background: BENCHMARK_COLORS[b.key] }} />
+                <span className="label">{b.label}</span>
+                <strong>{formatPln(b.current.value)}</strong>
+            </div>
+        )) : <span className="noBenchmarks">Toggle benchmarks to compare</span>}
+      </div>
     </div>
   );
 }
@@ -441,6 +476,7 @@ export function App() {
   const [endDate, setEndDate] = useState("");
   const [customEventsText, setCustomEventsText] = useState("");
   const [activeBenchmarks, setActiveBenchmarks] = useState({ sp500: true, gold: true });
+  const [hoverIndex, setHoverIndex] = useState(null);
 
   useEffect(() => {
     async function loadPortfolio() {
@@ -543,6 +579,8 @@ export function App() {
     setActiveBenchmarks((current) => ({ ...current, [key]: !current[key] }));
   }
 
+  const hoverPoint = hoverIndex !== null ? visibleSeries[hoverIndex] : null;
+
   return (
     <main className="appShell">
       <header className="topBar">
@@ -577,7 +615,9 @@ export function App() {
         <div className="metricPanel">
           <span>Total profit</span>
           <strong>{formatPln(data?.summary?.currentProfitValue || 0)}</strong>
-          <small>{formatPercent(data?.summary?.currentProfitPercent || 0)} vs deposits</small>
+          <small>
+            {formatPercent(data?.summary?.currentProfitPercent || 0)} total | {formatPercent(stats.avgDepositProfitPercent)} avg eff
+          </small>
         </div>
         <div className="metricPanel">
           <span>Market exposure</span>
@@ -604,17 +644,29 @@ export function App() {
                 />
               </div>
 
-              <BenchmarkToggles
-                benchmarks={data.benchmarks}
-                active={activeBenchmarks}
-                onToggle={toggleBenchmark}
-              />
+              <div className="chartActionsRow">
+                <BenchmarkToggles
+                  benchmarks={data.benchmarks}
+                  active={activeBenchmarks}
+                  onToggle={toggleBenchmark}
+                />
+                <LiveTooltip 
+                    hoverPoint={hoverPoint} 
+                    benchmarks={data.benchmarks} 
+                    visibleSeries={visibleSeries} 
+                    valueKey="totalValue" 
+                    valueLabel="Portfolio" 
+                    activeBenchmarks={activeBenchmarks}
+                />
+              </div>
 
               <PortfolioChart
                 series={visibleSeries}
                 benchmarks={visibleBenchmarks}
                 activeBenchmarks={activeBenchmarks}
                 events={visiblePortfolioEvents}
+                hoverIndex={hoverIndex}
+                onHover={setHoverIndex}
                 valueKey="totalValue"
                 benchmarkValueKey="value"
                 valueLabel="Portfolio value"
@@ -657,11 +709,26 @@ export function App() {
                   <h2>Profit curve (Zysk/Strata)</h2>
                 </div>
               </div>
+              
+              <div className="chartActionsRow">
+                <div /> {/* Spacer */}
+                <LiveTooltip 
+                    hoverPoint={hoverPoint} 
+                    benchmarks={data.benchmarks} 
+                    visibleSeries={visibleSeries} 
+                    valueKey="profitValue" 
+                    valueLabel="Profit/Loss" 
+                    activeBenchmarks={activeBenchmarks}
+                />
+              </div>
+
               <PortfolioChart
                 series={visibleSeries}
                 benchmarks={visibleBenchmarks}
                 activeBenchmarks={activeBenchmarks}
                 events={visibleProfitEvents}
+                hoverIndex={hoverIndex}
+                onHover={setHoverIndex}
                 valueKey="profitValue"
                 benchmarkValueKey="profitValue"
                 valueLabel="Profit/Loss"
