@@ -64,39 +64,35 @@ function filterByDate(series, startDate, endDate) {
   });
 }
 
-function parseCustomEvents(input) {
-  return input
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line, index) => {
-      const [rawDate, ...labelParts] = line.split("|");
-      const date = rawDate.trim();
-      const label = labelParts.join("|").trim() || "Event";
-      return /^\d{4}-\d{2}-\d{2}$/.test(date)
-        ? { key: `custom-${index}-${date}`, date, title: label, source: "custom" }
-        : null;
-    })
-    .filter(Boolean);
-}
-
-function buildPortfolioEvents(series) {
+function buildPortfolioEvents(series, customEvents) {
   if (!series.length) return [];
   const peak = series.reduce((best, point) =>
     Number(point.totalValue) > Number(best.totalValue) ? point : best
   );
-  return [
+  
+  const systemEvents = [
     {
       key: "peak",
       date: peak.date,
       title: "Portfolio high",
       value: formatPln(peak.totalValue),
       source: "system",
+      order: 0,
     },
   ];
+
+  const mappedCustom = customEvents
+    .map(ce => {
+      const point = series.find(p => p.date === ce.date);
+      if (!point) return null;
+      return { ...ce, value: formatPln(point.totalValue), order: 100 };
+    })
+    .filter(Boolean);
+
+  return [...systemEvents, ...mappedCustom].sort((a, b) => a.order - b.order || b.date.localeCompare(a.date));
 }
 
-function buildProfitEvents(series) {
+function buildProfitEvents(series, customEvents) {
   if (!series.length) return [];
   
   const profitPeak = series.reduce((best, point) =>
@@ -125,13 +121,14 @@ function buildProfitEvents(series) {
     }
   }
 
-  return [
+  const systemEvents = [
     {
       key: "profit-peak",
       date: profitPeak.date,
       title: "Profit high",
       value: formatPln(profitPeak.profitValue),
       source: "system",
+      order: 0,
     },
     {
       key: "profit-trough",
@@ -139,6 +136,7 @@ function buildProfitEvents(series) {
       title: "Profit low",
       value: formatPln(profitTrough.profitValue),
       source: "system",
+      order: 1,
     },
     biggestProfitJump
       ? {
@@ -147,6 +145,7 @@ function buildProfitEvents(series) {
           title: "Largest profit jump",
           value: formatPln(biggestProfitJump.change),
           source: "system",
+          order: 2,
         }
       : null,
     biggestProfitDrop
@@ -156,9 +155,20 @@ function buildProfitEvents(series) {
           title: "Largest profit drop",
           value: formatPln(biggestProfitDrop.change),
           source: "system",
+          order: 3,
         }
       : null,
   ].filter(Boolean);
+
+  const mappedCustom = customEvents
+    .map(ce => {
+      const point = series.find(p => p.date === ce.date);
+      if (!point) return null;
+      return { ...ce, value: formatPln(point.profitValue), order: 100 };
+    })
+    .filter(Boolean);
+
+  return [...systemEvents, ...mappedCustom].sort((a, b) => a.order - b.order || b.date.localeCompare(a.date));
 }
 
 function buildStats(series) {
@@ -534,7 +544,9 @@ export function App() {
   const [profitBenchmarks, setProfitBenchmarks] = useState({ sp500: false, gold: false });
   const [profitHover, setProfitHover] = useState(null);
 
-  const [customEventsText, setCustomEventsText] = useState("");
+  // Event State
+  const [customEvents, setCustomEvents] = useState([]);
+  const [eventInput, setEventInput] = useState("");
 
   useEffect(() => {
     async function loadPortfolio() {
@@ -594,16 +606,15 @@ export function App() {
     return benchmarks;
   }, [data, profitStart, profitEnd]);
 
-  const portfolioEvents = useMemo(() => buildPortfolioEvents(visiblePortfolioSeries), [visiblePortfolioSeries]);
-  const profitEvents = useMemo(() => buildProfitEvents(visibleProfitSeries), [visibleProfitSeries]);
-  const customEvents = useMemo(() => parseCustomEvents(customEventsText), [customEventsText]);
+  const portfolioEvents = useMemo(() => buildPortfolioEvents(visiblePortfolioSeries, customEvents), [visiblePortfolioSeries, customEvents]);
+  const profitEvents = useMemo(() => buildProfitEvents(visibleProfitSeries, customEvents), [visibleProfitSeries, customEvents]);
 
   const visiblePortfolioEvents = useMemo(
     () =>
-      [...portfolioEvents, ...customEvents].filter((event) =>
+      portfolioEvents.filter((event) =>
         visiblePortfolioSeries.some((point) => point.date === event.date)
       ),
-    [portfolioEvents, customEvents, visiblePortfolioSeries]
+    [portfolioEvents, visiblePortfolioSeries]
   );
 
   const visibleProfitEvents = useMemo(
@@ -655,6 +666,27 @@ export function App() {
     }
   }
 
+  function handleAddEvent() {
+    if (!eventInput.trim()) return;
+    const [rawDate, ...labelParts] = eventInput.split("|");
+    const date = rawDate.trim();
+    const label = labelParts.join("|").trim() || "Event";
+    
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      setCustomEvents(prev => [
+        ...prev, 
+        { key: `custom-${Date.now()}`, date, title: label, source: "custom" }
+      ]);
+      setEventInput("");
+    } else {
+      setError("Invalid format. Use YYYY-MM-DD | Label");
+    }
+  }
+
+  function handleRemoveCustomEvent(key) {
+    setCustomEvents(prev => prev.filter(e => e.key !== key));
+  }
+
   const portfolioHoverPoint = portfolioHover !== null ? visiblePortfolioSeries[portfolioHover] : null;
   const profitHoverPoint = profitHover !== null ? visibleProfitSeries[profitHover] : null;
 
@@ -676,7 +708,7 @@ export function App() {
         </form>
       </header>
 
-      {error ? <div className="statusError">{error}</div> : null}
+      {error ? <div className="statusError" onClick={() => setError("")}>{error}</div> : null}
 
       <section className="commandGrid">
         <div className="metricPanel">
@@ -760,18 +792,28 @@ export function App() {
                   <h2>Portfolio milestones</h2>
                 </div>
               </div>
-              <textarea
-                value={customEventsText}
-                onChange={(event) => setCustomEventsText(event.target.value)}
-                placeholder={"2024-02-01 | Fed decision\n2025-08-12 | Big rebalance"}
-              />
+              
+              <div className="eventAddBox">
+                <input 
+                  type="text" 
+                  value={eventInput}
+                  onChange={(e) => setEventInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddEvent()}
+                  placeholder="YYYY-MM-DD | Event Name"
+                />
+                <button onClick={handleAddEvent}>Add</button>
+              </div>
+
               <div className="eventList">
                 {visiblePortfolioEvents.length ? (
                   visiblePortfolioEvents.map((event) => (
-                    <article key={event.key}>
+                    <article key={event.key} className={event.source === "custom" ? "customEvent" : ""}>
                       <time>{formatDate(event.date)}</time>
                       <strong>{event.title}</strong>
                       {event.value ? <span>{event.value}</span> : null}
+                      {event.source === "custom" && (
+                        <button className="removeEventBtn" onClick={() => handleRemoveCustomEvent(event.key)} title="Remove event">×</button>
+                      )}
                     </article>
                   ))
                 ) : (
@@ -836,10 +878,13 @@ export function App() {
               <div className="eventList">
                 {visibleProfitEvents.length ? (
                   visibleProfitEvents.map((event) => (
-                    <article key={event.key}>
+                    <article key={event.key} className={event.source === "custom" ? "customEvent" : ""}>
                       <time>{formatDate(event.date)}</time>
                       <strong>{event.title}</strong>
                       {event.value ? <span>{event.value}</span> : null}
+                      {event.source === "custom" && (
+                        <button className="removeEventBtn" onClick={() => handleRemoveCustomEvent(event.key)} title="Remove event">×</button>
+                      )}
                     </article>
                   ))
                 ) : (
