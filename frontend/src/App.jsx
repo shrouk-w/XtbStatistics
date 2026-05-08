@@ -548,6 +548,14 @@ export function App() {
   const [customEvents, setCustomEvents] = useState([]);
   const [eventInput, setEventInput] = useState("");
 
+  // Manual Update State
+  const [manualDate, setManualDate] = useState(new Date().toISOString().slice(0, 10));
+  const [manualType, setManualType] = useState("Stock purchase");
+  const [manualSymbol, setManualSymbol] = useState("");
+  const [manualAmount, setManualAmount] = useState("");
+  const [manualPrice, setManualPrice] = useState("");
+  const [manualComment, setManualComment] = useState("");
+
   useEffect(() => {
     async function loadPortfolio() {
       setLoading(true);
@@ -630,8 +638,8 @@ export function App() {
     [visiblePortfolioSeries]
   );
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  async function handleSubmit(event, persist = false) {
+    if (event) event.preventDefault();
     setError("");
 
     if (!files.length) {
@@ -641,6 +649,7 @@ export function App() {
 
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
+    formData.append("persist", persist);
 
     setLoading(true);
     try {
@@ -658,12 +667,63 @@ export function App() {
       setPortfolioEnd(payload.summary.endDate);
       setProfitStart(payload.summary.startDate);
       setProfitEnd(payload.summary.endDate);
+      if (persist) {
+          alert("Portfolio synchronized and saved to database.");
+          setFiles([]); // Clear after sync
+      }
     } catch (submitError) {
       setError(submitError.message || "Wystapil blad podczas wysylki.");
       setData(null);
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleManualSync(event) {
+      event.preventDefault();
+      setError("");
+      
+      const qty = parseFloat(manualAmount) || 0;
+      const price = parseFloat(manualPrice) || 0;
+      
+      let finalAmount = 0;
+      if (manualType.includes("Stock")) {
+          finalAmount = qty * price;
+      } else {
+          finalAmount = qty; // For Deposit/Withdrawal/Dividend qty is the main value
+      }
+
+      const payload = {
+          time: manualDate,
+          operation_type: manualType,
+          symbol: manualSymbol || null,
+          amount: finalAmount,
+          comment: manualType.includes("Stock") ? `Qty: ${qty}, Price: ${price} | ${manualComment}` : manualComment
+      };
+
+      setLoading(true);
+      try {
+          const response = await fetch(`${API_BASE}/api/portfolio/manual`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+          });
+          if (!response.ok) throw new Error("Manual sync failed.");
+          
+          // Reload portfolio
+          const getRes = await fetch(`${API_BASE}/api/portfolio`);
+          if (getRes.ok) setData(await getRes.json());
+          
+          setManualAmount("");
+          setManualPrice("");
+          setManualSymbol("");
+          setManualComment("");
+          alert("Manual operation added successfully.");
+      } catch (err) {
+          setError(err.message);
+      } finally {
+          setLoading(false);
+      }
   }
 
   function handleAddEvent() {
@@ -697,15 +757,41 @@ export function App() {
           <span className="brandMark">XTBX</span>
           <h1>Portfolio Command Center</h1>
         </div>
-        <form className="uploadRail" onSubmit={handleSubmit}>
-          <input
-            type="file"
-            accept=".xlsx"
-            multiple
-            onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
-          />
-          <button type="submit" disabled={loading}>{loading ? "Analyzing" : "Analyze"}</button>
-        </form>
+        
+        <div className="modernUploadControl">
+          <div className="fileInputWrapper">
+            <button className="selectFilesBtn" type="button" onClick={() => document.getElementById('hiddenFileInput').click()}>
+              Select files
+            </button>
+            <div className={`fileStatus ${files.length > 0 ? 'hasFiles' : ''}`}>
+              {files.length > 0 ? `${files.length} files selected` : "Drop XLSX reports here"}
+            </div>
+            <input
+              id="hiddenFileInput"
+              type="file"
+              accept=".xlsx"
+              multiple
+              style={{ display: 'none' }}
+              onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
+            />
+          </div>
+          <div className="uploadActionButtons">
+            <button 
+              className="actionBtn analyze" 
+              onClick={(e) => handleSubmit(e, false)} 
+              disabled={loading || !files.length}
+            >
+              Analyze
+            </button>
+            <button 
+              className="actionBtn sync" 
+              onClick={(e) => handleSubmit(e, true)} 
+              disabled={loading || !files.length}
+            >
+              Analyze & Sync
+            </button>
+          </div>
+        </div>
       </header>
 
       {error ? <div className="statusError" onClick={() => setError("")}>{error}</div> : null}
@@ -732,6 +818,48 @@ export function App() {
           <span>Market exposure</span>
           <strong>{formatPercent(stats.investedPercent)}</strong>
           <small>holdings / total</small>
+        </div>
+      </section>
+
+      <section className="manualUpdate">
+        <div className="updatePanel">
+          <div className="panelHead compact">
+            <div>
+              <span>Manual Entry</span>
+              <h2>Record Portfolio Change</h2>
+            </div>
+          </div>
+          <div className="manualTypeSelector">
+            {["Stock purchase", "Stock sale", "Dividend", "Deposit", "Withdrawal"].map((type) => (
+              <button
+                key={type}
+                type="button"
+                className={`typeBtn ${type.replace(" ", "").toLowerCase()} ${manualType === type ? "active" : ""}`}
+                onClick={() => setManualType(type)}
+              >
+                {type}
+              </button>
+            ))}
+          </div>
+          <form className="manualForm" onSubmit={handleManualSync}>
+            <input type="date" value={manualDate} onChange={e => setManualDate(e.target.value)} />
+            
+            {!(manualType === "Deposit" || manualType === "Withdrawal") ? (
+              <>
+                <input type="text" placeholder="Ticker (e.g. AAPL.US)" value={manualSymbol} onChange={e => setManualSymbol(e.target.value)} />
+                <input type="number" step="0.01" placeholder="Quantity" value={manualAmount} onChange={e => setManualAmount(e.target.value)} required />
+                <input type="number" step="0.01" placeholder="Price" value={manualPrice} onChange={e => setManualPrice(e.target.value)} />
+                <input type="text" placeholder="Comment" value={manualComment} onChange={e => setManualComment(e.target.value)} />
+              </>
+            ) : (
+              <>
+                <input type="number" step="0.01" placeholder="Value (PLN)" value={manualAmount} onChange={e => setManualAmount(e.target.value)} required />
+                <input type="text" placeholder="Comment" value={manualComment} onChange={e => setManualComment(e.target.value)} className="wideComment" />
+              </>
+            )}
+            
+            <button type="submit" disabled={loading} className="submitManualBtn">Add Record</button>
+          </form>
         </div>
       </section>
 

@@ -13,7 +13,7 @@
   --mint: #7cf6d2;
   --violet: #b78cff;
   --gold: #ffd166;
-  --red: #ff7a59;
+  --red: #ff4d4d;
 }
 
 * {
@@ -61,7 +61,7 @@ button:disabled {
 
 .topBar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 520px);
+  grid-template-columns: minmax(0, 1fr) minmax(480px, 680px);
   gap: 16px;
   align-items: end;
   margin-bottom: 16px;
@@ -91,30 +91,109 @@ h2 {
   font-weight: 700;
 }
 
-.uploadRail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 130px;
-  gap: 8px;
-}
-
-.uploadRail input, .dateInputs input, .sidePanel textarea {
+.modernUploadControl {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(13, 20, 32, 0.4);
   border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px;
+  width: 100%;
+}
+
+.fileInputWrapper {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px;
+  flex: 1;
+}
+
+.selectFilesBtn {
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+.selectFilesBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--cyan);
+}
+
+.fileStatus {
+  flex: 1;
+  height: 44px;
+  border: 2px dashed var(--line);
   border-radius: 8px;
-  background: rgba(13, 20, 32, 0.88);
-  outline: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.2);
+  transition: all 0.2;
 }
 
-.uploadRail input {
-  min-width: 0;
-  padding: 10px;
+.modernUploadControl:hover .fileStatus {
+  border-color: rgba(79, 209, 255, 0.4);
+  background: rgba(79, 209, 255, 0.03);
 }
 
-.uploadRail button {
-  color: #001017;
-  border-color: rgba(79, 209, 255, 0.6);
-  background: linear-gradient(180deg, var(--cyan), var(--mint));
+.fileStatus.hasFiles {
+    color: var(--mint);
+    border-style: solid;
+    border-color: var(--mint);
+    background: rgba(124, 246, 210, 0.05);
+}
+
+.uploadActionButtons {
+  display: flex;
+  gap: 6px;
+}
+
+.actionBtn {
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
   font-weight: 800;
-  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.actionBtn.analyze {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.actionBtn.analyze:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.actionBtn.sync {
+  background: linear-gradient(180deg, var(--cyan), var(--mint));
+  color: #001017;
+}
+
+.actionBtn.sync:hover:not(:disabled) {
+  box-shadow: 0 0 15px rgba(79, 209, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+.actionBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
 }
 
 .statusError {
@@ -131,6 +210,123 @@ h2 {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.manualUpdate {
+    margin-bottom: 16px;
+}
+
+.updatePanel {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(17, 26, 41, 0.6), rgba(9, 14, 23, 0.6));
+    padding: 20px;
+}
+
+.manualTypeSelector {
+    display: flex;
+    gap: 10px;
+    margin: 16px 0;
+}
+
+.typeBtn {
+    flex: 1;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0.6;
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text);
+}
+
+.typeBtn:hover {
+    opacity: 0.85;
+}
+
+.typeBtn.active {
+    opacity: 1;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.2);
+}
+
+/* Green: Purchase & Deposit */
+.typeBtn.stockpurchase, .typeBtn.deposit {
+    border-color: rgba(0, 255, 127, 0.45);
+    color: #00ff7f;
+}
+.typeBtn.stockpurchase.active, .typeBtn.deposit.active {
+    background: rgba(0, 255, 127, 0.15);
+    border-color: #00ff7f;
+    box-shadow: 0 0 15px rgba(0, 255, 127, 0.2);
+}
+
+/* Red: Sale & Withdrawal */
+.typeBtn.stocksale, .typeBtn.withdrawal {
+    border-color: rgba(255, 77, 77, 0.45);
+    color: var(--red);
+}
+.typeBtn.stocksale.active, .typeBtn.withdrawal.active {
+    background: rgba(255, 77, 77, 0.15);
+    border-color: var(--red);
+    box-shadow: 0 0 15px rgba(255, 77, 77, 0.1);
+}
+
+/* White/Gray: Dividend */
+.typeBtn.dividend {
+    border-color: rgba(231, 251, 255, 0.45);
+    color: var(--text);
+}
+.typeBtn.dividend.active {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--text);
+    box-shadow: 0 0 15px rgba(255, 255, 255, 0.05);
+}
+
+.manualForm {
+    display: grid;
+    grid-template-columns: 180px 1.2fr 160px 160px 1fr 140px;
+    gap: 12px;
+}
+
+.manualForm .wideComment {
+    grid-column: span 3;
+}
+
+.manualForm input {
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+}
+
+.manualForm input:focus {
+    border-color: var(--cyan);
+}
+
+.submitManualBtn {
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: all 0.2s;
+}
+
+.submitManualBtn:hover:not(:disabled) {
+    background: var(--mint);
+    color: #000;
+    border-color: var(--mint);
+    box-shadow: 0 0 20px rgba(124, 246, 210, 0.2);
 }
 
 .metricPanel, .chartPanel, .sidePanel, .dataPanel, .emptyLanding {
