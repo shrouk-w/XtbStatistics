@@ -14,12 +14,15 @@ from typing import Any
 import pandas as pd
 import httpx
 import yfinance as yf
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
+from sqlalchemy.orm import Session
 
+from .database import get_db, init_db
+from .models import CashOperation, ClosedPosition, OpenPosition, PendingOrder
 
 COMMENT_RE = re.compile(
     r"(?:OPEN|CLOSE) BUY (?P<quantity>\d+(?:\.\d+)?)(?:/(?P<total>\d+(?:\.\d+)?))? @ (?P<price>\d+(?:\.\d+)?)"
@@ -78,7 +81,17 @@ class CashEvent:
     operation_type: str
 
 
+from pydantic import BaseModel
+
+class ManualOperation(BaseModel):
+    time: str # YYYY-MM-DD
+    operation_type: str
+    symbol: str | None = None
+    amount: float
+    comment: str | None = None
+
 def create_app() -> FastAPI:
+    init_db()
     app = FastAPI(title="XTB Portfolio History")
     app.add_middleware(
         CORSMiddleware,
@@ -92,8 +105,76 @@ def create_app() -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/api/portfolio/manual")
+    async def add_manual_operation(op: ManualOperation, db: Session = Depends(get_db)):
+        new_op = CashOperation(
+            operation_type=op.operation_type,
+            symbol=op.symbol,
+            time=datetime.strptime(op.time, "%Y-%m-%d"),
+            amount=op.amount,
+            comment=op.comment
+        )
+        db.add(new_op)
+        db.commit()
+        return {"status": "success"}
+
+    @app.get("/api/portfolio")
+    async def get_portfolio(db: Session = Depends(get_db)) -> dict[str, Any]:
+        # Fetch from DB
+        db_cash = db.query(CashOperation).all()
+        db_pending = db.query(PendingOrder).all()
+        
+        cash_events: list[CashEvent] = []
+        external_cash_events: list[tuple[date, float]] = []
+        trade_cash_events: list[tuple[date, float]] = []
+        position_events: list[PositionEvent] = []
+
+        for op in db_cash:
+            event_date = op.time.date()
+            cash_events.append(CashEvent(event_date=event_date, amount=op.amount, operation_type=op.operation_type))
+            
+            # Normalize operation types from DB
+            op_type_raw = str(op.operation_type or "").strip().lower()
+            
+            if op_type_raw in {"stock purchase", "stock sale", "stock sell"}:
+                trade_cash_events.append((event_date, op.amount))
+            elif is_external_cash_operation(op_type_raw):
+                external_cash_events.append((event_date, op.amount))
+            
+            # If it's a purchase/sell, we need quantity deltas
+            if op_type_raw in {"stock purchase", "stock sale", "stock sell"}:
+                quantity = extract_quantity(op.comment)
+                if quantity:
+                    delta = quantity if op_type_raw == "stock purchase" else -quantity
+                    position_events.append(
+                        PositionEvent(
+                            ticker=op.symbol,
+                            yahoo_ticker=to_yahoo_symbol(op.symbol),
+                            quantity_delta=delta,
+                            trade_date=event_date,
+                        )
+                    )
+
+        # Include Pending Orders Margin as tied up cash (negative impact on available cash)
+        for order in db_pending:
+            if order.margin:
+                event_date = order.open_time.date()
+                # Assuming margin is positive in DB, it subtracts from available cash
+                cash_events.append(CashEvent(event_date=event_date, amount=-float(order.margin), operation_type="Pending Order Margin"))
+
+        if not cash_events and not position_events:
+            print("DEBUG: No data found in database.")
+            return {"summary": {}, "series": [], "holdings": [], "benchmarks": {}, "warnings": ["No data in database."]}
+
+        portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events)
+        return portfolio
+
     @app.post("/api/portfolio/analyze")
-    async def analyze_portfolio(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    async def analyze_portfolio(
+        files: list[UploadFile] = File(...),
+        persist: bool = False,
+        db: Session = Depends(get_db)
+    ) -> dict[str, Any]:
         if not files:
             raise HTTPException(status_code=400, detail="No files uploaded.")
 
@@ -102,6 +183,9 @@ def create_app() -> FastAPI:
         trade_cash_events: list[tuple[date, float]] = []
         position_events: list[PositionEvent] = []
         warnings: list[str] = []
+
+        all_db_ops: list[CashOperation] = []
+        all_db_pending: list[PendingOrder] = []
 
         for upload in files:
             filename = upload.filename or "uploaded.xlsx"
@@ -116,6 +200,57 @@ def create_app() -> FastAPI:
             trade_cash_events.extend(parsed["trade_cash_events"])
             position_events.extend(parsed["position_events"])
             warnings.extend(parsed["warnings"])
+
+            if persist:
+                # Basic persistence implementation
+                # Note: Full persistence (Positions, etc.) would need more detailed parsing
+                # but we'll focus on the core events for now.
+                workbook = load_workbook(io.BytesIO(payload), data_only=True)
+                
+                # Persistence for Cash Operations
+                if "Cash Operations" in workbook.sheetnames:
+                    sheet = workbook["Cash Operations"]
+                    for row in sheet.iter_rows(min_row=6, values_only=True):
+                        if not row or not row[0]: continue
+                        op = CashOperation(
+                            operation_type=str(row[0]).strip(),
+                            symbol=(row[1] or "").strip(),
+                            time=row[3] if isinstance(row[3], datetime) else None,
+                            amount=float(row[4]) if row[4] is not None else 0.0,
+                            comment=(row[6] or "").strip()
+                        )
+                        if op.time:
+                            # Use a simple way to avoid full duplicates if external_id was available
+                            # Since standard XTB Excel doesn't always have a clear unique ID in all versions
+                            # we merge based on time, type and amount as a heuristic if no ID.
+                            # But looking at models, we have external_id.
+                            # In parse_xtb_workbook we don't have ID, but the script import_excel.py does.
+                            # We'll stick to merging into DB.
+                            db.add(op)
+
+                # Persistence for Pending Orders
+                pending_sheet_name = next((s for s in workbook.sheetnames if "PENDING ORDERS" in s.upper()), None)
+                if pending_sheet_name:
+                    sheet = workbook[pending_sheet_name]
+                    for row in sheet.iter_rows(min_row=9, values_only=True):
+                        if not row or row[0] is None: continue
+                        try:
+                            order = PendingOrder(
+                                order_id=row[0],
+                                symbol=row[1],
+                                margin=float(row[5]) if row[5] is not None else 0.0,
+                                open_time=row[12] if isinstance(row[12], datetime) else None
+                            )
+                            if order.order_id:
+                                db.merge(order)
+                        except: continue
+
+        if persist:
+            try:
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                warnings.append(f"Database sync failed: {str(e)}")
 
         if not cash_events and not position_events:
             raise HTTPException(status_code=400, detail="No XTB transactions found in uploaded files.")
@@ -171,7 +306,7 @@ def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
         cash_amount = float(amount)
         cash_events.append(CashEvent(event_date=event_date, amount=cash_amount, operation_type=operation_type))
 
-        if operation_type in {"Stock purchase", "Stock sell"}:
+        if operation_type in {"Stock purchase", "Stock sale", "Stock sell"}:
             trade_cash_events.append((event_date, cash_amount))
         elif is_external_cash_operation(operation_type):
             external_cash_events.append((event_date, cash_amount))
@@ -189,7 +324,7 @@ def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
                     trade_date=event_date,
                 )
             )
-        elif operation_type == "Stock sell":
+        elif operation_type in {"Stock sale", "Stock sell"}:
             quantity = extract_quantity(comment)
             if quantity is None:
                 warnings.append(f"{filename}: could not parse quantity from comment '{comment}'.")
@@ -203,6 +338,29 @@ def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
                 )
             )
 
+    # Process Pending Orders if sheet exists
+    pending_sheet_name = next((s for s in workbook.sheetnames if "PENDING ORDERS" in s.upper()), None)
+    if pending_sheet_name:
+        sheet = workbook[pending_sheet_name]
+        # XTB Excel structure for Pending Orders usually has headers at row 8, data starts at row 9
+        for row in sheet.iter_rows(min_row=9, values_only=True):
+            if not row or row[0] is None:
+                continue
+            
+            try:
+                # Margin is typically at column F (index 5)
+                # Open time is typically at column M (index 12)
+                margin = float(row[5]) if row[5] is not None else 0.0
+                open_time = row[12]
+                if margin > 0 and isinstance(open_time, datetime):
+                    cash_events.append(CashEvent(
+                        event_date=open_time.date(),
+                        amount=-margin,
+                        operation_type="Pending Order Margin"
+                    ))
+            except (ValueError, TypeError, IndexError):
+                continue
+
     return {
         "cash_events": cash_events,
         "external_cash_events": external_cash_events,
@@ -214,7 +372,14 @@ def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
 
 def is_external_cash_operation(operation_type: str) -> bool:
     normalized = operation_type.lower()
-    return any(keyword in normalized for keyword in ["deposit", "withdrawal", "transfer"])
+    # "Deposit" or "Withdrawal" or "Transfer" usually means external.
+    # Exclude "Stock purchase" and "Stock sale" which are trades.
+    # Exclude "DIVIDENT" and "Interest" which are internal earnings.
+    if any(trade in normalized for trade in ["stock purchase", "stock sale", "stock sell", "trade"]):
+        return False
+    if any(earning in normalized for earning in ["divident", "interest"]):
+        return False
+    return any(keyword in normalized for keyword in ["deposit", "withdrawal", "transfer", "wplata", "wyplata"])
 
 
 def to_yahoo_symbol(xtb_ticker: str) -> str:

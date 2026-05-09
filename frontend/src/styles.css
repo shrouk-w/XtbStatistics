@@ -13,16 +13,14 @@
   --mint: #7cf6d2;
   --violet: #b78cff;
   --gold: #ffd166;
-  --red: #ff7a59;
+  --red: #ff4d4d;
 }
 
 * {
   box-sizing: border-box;
 }
 
-html,
-body,
-#root {
+html, body, #root {
   min-width: 320px;
   min-height: 100%;
 }
@@ -38,16 +36,11 @@ body {
   background-size: 44px 44px, 44px 44px, auto, auto, auto;
 }
 
-button,
-input,
-textarea,
-table {
+button, input, textarea, table {
   font: inherit;
 }
 
-button,
-input,
-textarea {
+button, input, textarea {
   color: var(--text);
 }
 
@@ -68,7 +61,7 @@ button:disabled {
 
 .topBar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 520px);
+  grid-template-columns: minmax(0, 1fr) minmax(480px, 680px);
   gap: 16px;
   align-items: end;
   margin-bottom: 16px;
@@ -76,20 +69,12 @@ button:disabled {
   border-bottom: 1px solid var(--line);
 }
 
-.brandMark,
-.panelHead span,
-.metricPanel span {
+.brandMark, .panelHead span, .metricPanel span {
   color: var(--mint);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-}
-
-h1,
-h2,
-p {
-  margin-top: 0;
 }
 
 h1 {
@@ -106,40 +91,109 @@ h2 {
   font-weight: 700;
 }
 
-.uploadRail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 130px;
-  gap: 8px;
-}
-
-.uploadRail input,
-.dateInputs input,
-.sidePanel textarea {
+.modernUploadControl {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(13, 20, 32, 0.4);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(13, 20, 32, 0.88);
-  outline: none;
+  border-radius: 10px;
+  padding: 6px;
+  width: 100%;
 }
 
-.uploadRail input {
-  min-width: 0;
-  padding: 10px;
+.fileInputWrapper {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px;
+  flex: 1;
 }
 
-.uploadRail button,
-.segmented button,
-.togglePill span {
+.selectFilesBtn {
+  background: var(--line);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: linear-gradient(180deg, #142237, #0c1422);
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
   color: var(--text);
+  white-space: nowrap;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
 }
 
-.uploadRail button {
-  color: #001017;
-  border-color: rgba(79, 209, 255, 0.6);
-  background: linear-gradient(180deg, var(--cyan), var(--mint));
+.selectFilesBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--cyan);
+}
+
+.fileStatus {
+  flex: 1;
+  height: 44px;
+  border: 2px dashed var(--line);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.2);
+  transition: all 0.2;
+}
+
+.modernUploadControl:hover .fileStatus {
+  border-color: rgba(79, 209, 255, 0.4);
+  background: rgba(79, 209, 255, 0.03);
+}
+
+.fileStatus.hasFiles {
+    color: var(--mint);
+    border-style: solid;
+    border-color: var(--mint);
+    background: rgba(124, 246, 210, 0.05);
+}
+
+.uploadActionButtons {
+  display: flex;
+  gap: 6px;
+}
+
+.actionBtn {
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
   font-weight: 800;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.actionBtn.analyze {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.actionBtn.analyze:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.actionBtn.sync {
+  background: linear-gradient(180deg, var(--cyan), var(--mint));
+  color: #001017;
+}
+
+.actionBtn.sync:hover:not(:disabled) {
+  box-shadow: 0 0 15px rgba(79, 209, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+.actionBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
 }
 
 .statusError {
@@ -158,21 +212,129 @@ h2 {
   margin-bottom: 12px;
 }
 
-.metricPanel,
-.chartPanel,
-.profitPanel,
-.sidePanel,
-.dataPanel,
-.emptyLanding {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(17, 26, 41, 0.94), rgba(9, 14, 23, 0.94));
-  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.26);
+.manualUpdate {
+    margin-bottom: 16px;
 }
 
-.metricPanel {
-  padding: 14px;
-  min-height: 112px;
+.updatePanel {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(17, 26, 41, 0.6), rgba(9, 14, 23, 0.6));
+    padding: 20px;
+}
+
+.manualTypeSelector {
+    display: flex;
+    gap: 10px;
+    margin: 16px 0;
+}
+
+.typeBtn {
+    flex: 1;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0.6;
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text);
+}
+
+.typeBtn:hover {
+    opacity: 0.85;
+}
+
+.typeBtn.active {
+    opacity: 1;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.2);
+}
+
+/* Green: Purchase & Deposit */
+.typeBtn.stockpurchase, .typeBtn.deposit {
+    border-color: rgba(0, 255, 127, 0.45);
+    color: #00ff7f;
+}
+.typeBtn.stockpurchase.active, .typeBtn.deposit.active {
+    background: rgba(0, 255, 127, 0.15);
+    border-color: #00ff7f;
+    box-shadow: 0 0 15px rgba(0, 255, 127, 0.2);
+}
+
+/* Red: Sale & Withdrawal */
+.typeBtn.stocksale, .typeBtn.withdrawal {
+    border-color: rgba(255, 77, 77, 0.45);
+    color: var(--red);
+}
+.typeBtn.stocksale.active, .typeBtn.withdrawal.active {
+    background: rgba(255, 77, 77, 0.15);
+    border-color: var(--red);
+    box-shadow: 0 0 15px rgba(255, 77, 77, 0.1);
+}
+
+/* White/Gray: Dividend */
+.typeBtn.dividend {
+    border-color: rgba(231, 251, 255, 0.45);
+    color: var(--text);
+}
+.typeBtn.dividend.active {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--text);
+    box-shadow: 0 0 15px rgba(255, 255, 255, 0.05);
+}
+
+.manualForm {
+    display: grid;
+    grid-template-columns: 180px 1.2fr 160px 160px 1fr 140px;
+    gap: 12px;
+}
+
+.manualForm .wideComment {
+    grid-column: span 3;
+}
+
+.manualForm input {
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+}
+
+.manualForm input:focus {
+    border-color: var(--cyan);
+}
+
+.submitManualBtn {
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: all 0.2s;
+}
+
+.submitManualBtn:hover:not(:disabled) {
+    background: var(--mint);
+    color: #000;
+    border-color: var(--mint);
+    box-shadow: 0 0 20px rgba(124, 246, 210, 0.2);
+}
+
+.metricPanel, .chartPanel, .sidePanel, .dataPanel, .emptyLanding {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(17, 26, 41, 0.94), rgba(9, 14, 23, 0.94));
+  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.26);
+  padding: 16px;
 }
 
 .metricPanel strong {
@@ -185,23 +347,14 @@ h2 {
 
 .metricPanel small {
   color: var(--muted);
+  font-size: 12px;
 }
 
 .workbench {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 12px;
-}
-
-.chartPanel,
-.profitPanel,
-.sidePanel,
-.dataPanel {
-  padding: 14px;
-}
-
-.profitPanel {
-  margin-top: 12px;
+  margin-bottom: 12px;
 }
 
 .panelHead {
@@ -209,11 +362,7 @@ h2 {
   justify-content: space-between;
   gap: 16px;
   align-items: start;
-  margin-bottom: 12px;
-}
-
-.panelHead.compact {
-  margin-bottom: 10px;
+  margin-bottom: 16px;
 }
 
 .controlCluster {
@@ -224,19 +373,20 @@ h2 {
 
 .segmented {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
 }
 
 .segmented button {
-  min-width: 44px;
-  padding: 7px 9px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
   color: var(--muted);
 }
 
-.segmented button:hover,
-.togglePill span:hover {
-  border-color: rgba(79, 209, 255, 0.7);
+.segmented button:hover {
+  border-color: var(--cyan);
   color: var(--text);
 }
 
@@ -245,359 +395,332 @@ h2 {
   gap: 8px;
 }
 
-.dateInputs label {
-  display: grid;
-  gap: 3px;
-  color: var(--muted);
-  font-size: 11px;
+.dateInputs input {
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 130px;
 }
 
-.dateInputs input {
-  width: 142px;
-  padding: 7px;
+.chartActionsRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 16px;
+  min-height: 100px;
 }
 
 .benchmarkToggles {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
-  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.togglePill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.togglePill:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(79, 209, 255, 0.3);
+}
+
+.togglePill:has(input:checked) {
+  background: rgba(79, 209, 255, 0.12);
+  border-color: rgba(79, 209, 255, 0.5);
+  box-shadow: 0 0 12px rgba(79, 209, 255, 0.05);
 }
 
 .togglePill input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
+  display: none;
 }
 
 .togglePill span {
-  display: inline-flex;
-  gap: 8px;
-  align-items: center;
-  padding: 8px 10px;
-  color: var(--muted);
   font-size: 13px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .togglePill span::before {
   content: "";
-  width: 9px;
-  height: 9px;
-  border-radius: 99px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
   background: var(--dot);
-  box-shadow: 0 0 14px var(--dot);
+  box-shadow: 0 0 10px var(--dot);
 }
 
 .togglePill input:checked + span {
-  border-color: rgba(124, 246, 210, 0.7);
   color: var(--text);
-  background: rgba(124, 246, 210, 0.08);
+  font-weight: 600;
+}
+
+.liveTooltip {
+  width: 320px;
+  min-height: 180px;
+  background: rgba(13, 20, 32, 0.8);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  backdrop-filter: blur(10px);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.liveTooltip.active {
+  border-color: rgba(79, 209, 255, 0.5);
+  box-shadow: 0 0 20px rgba(79, 209, 255, 0.1);
+}
+
+.liveTooltip .noBenchmarks {
+  font-size: 12px;
+  color: var(--muted);
+  opacity: 0.8;
+  font-style: italic;
+  margin-top: 4px;
+}
+
+.tipDate {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+  color: var(--cyan);
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.tipContent {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tipGroup {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+
+.tipGroup label {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.tipGroup strong {
+  color: var(--text);
+  font-family: monospace;
+  font-size: 14px;
+}
+
+.tipBenchmarks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.tipBenchRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tipBenchRow .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.tipBenchRow .label {
+  flex: 1;
+  color: var(--muted);
+}
+
+.tipBenchRow strong {
+  color: var(--text);
+  font-family: monospace;
 }
 
 .chartShell {
   position: relative;
-  min-height: 420px;
-}
-
-.chartEmpty {
-  display: grid;
-  place-items: center;
-  min-height: 420px;
-  border: 1px solid rgba(37, 54, 76, 0.8);
-  border-radius: 8px;
-  background: rgba(4, 8, 14, 0.64);
-  color: var(--muted);
+  margin-top: 8px;
 }
 
 .chartSvg {
   display: block;
   width: 100%;
   height: 420px;
-  border: 1px solid rgba(37, 54, 76, 0.8);
+  background: rgba(4, 8, 14, 0.4);
   border-radius: 8px;
-  background: rgba(4, 8, 14, 0.64);
+  overflow: visible;
 }
 
-.gridLine {
-  stroke: rgba(141, 162, 184, 0.16);
-  stroke-width: 1;
+.eventAddBox {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
-.axisLabel {
-  fill: var(--muted);
-  font-size: 11px;
-}
-
-.portfolioLine {
-  fill: none;
-  stroke: var(--mint);
-  stroke-width: 4;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-  filter: drop-shadow(0 0 8px rgba(124, 246, 210, 0.45));
-}
-
-.benchmarkLine {
-  fill: none;
-  stroke-width: 2.5;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-  opacity: 0.9;
-}
-
-.eventLine,
-.hoverLine {
-  stroke-width: 1;
-  stroke-dasharray: 5 7;
-}
-
-.eventLine {
-  stroke: rgba(255, 209, 102, 0.48);
-}
-
-.hoverLine {
-  stroke: rgba(79, 209, 255, 0.72);
-}
-
-.eventDot {
-  stroke: #07101a;
-  stroke-width: 2;
-}
-
-.eventDot.system {
-  fill: var(--gold);
-}
-
-.eventDot.custom {
-  fill: var(--violet);
-}
-
-.eventLabel {
-  fill: #f4fbff;
-  font-size: 11px;
-  paint-order: stroke;
-  stroke: #050910;
-  stroke-width: 4px;
-}
-
-.hoverDot {
-  fill: var(--cyan);
-  stroke: #001017;
-  stroke-width: 2;
-}
-
-.chartTooltip {
-  position: absolute;
-  right: 14px;
-  top: 14px;
-  display: grid;
-  gap: 5px;
-  min-width: 230px;
-  padding: 10px;
-  border: 1px solid rgba(79, 209, 255, 0.5);
+.eventAddBox input {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(3, 7, 12, 0.92);
+  padding: 8px 12px;
   color: var(--text);
   font-size: 13px;
-  box-shadow: 0 0 24px rgba(79, 209, 255, 0.16);
+  outline: none;
 }
 
-.chartTooltip strong {
-  color: var(--cyan);
-}
-
-.sidePanel textarea {
-  width: 100%;
-  min-height: 112px;
-  resize: vertical;
-  padding: 10px;
+.eventAddBox button {
+  padding: 0 16px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 8px;
   color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.eventAddBox button:hover {
+  background: var(--cyan);
+  color: #000;
+}
+
+.sidePanel {
+  display: flex;
+  flex-direction: column;
+  max-height: 700px;
 }
 
 .eventList {
-  display: grid;
-  gap: 8px;
-  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  flex: 1;
+  padding-right: 4px;
 }
 
-.eventList article,
-.insightRow,
-.warningStack p {
-  border: 1px solid rgba(37, 54, 76, 0.8);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.025);
+/* Custom Scrollbar */
+.eventList::-webkit-scrollbar {
+  width: 6px;
+}
+
+.eventList::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 3px;
+}
+
+.eventList::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+
+.eventList::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 
 .eventList article {
-  display: grid;
-  gap: 4px;
-  padding: 10px;
+  position: relative;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.eventList time,
-.eventList span,
-.insightRow span,
-.insightMeta,
-.emptyState {
+.eventList article.customEvent {
+  border-left: 3px solid var(--cyan);
+  background: rgba(79, 209, 255, 0.05);
+}
+
+.removeEventBtn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
   color: var(--muted);
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  transition: all 0.2s;
 }
 
-.eventList strong,
-.insightRow strong {
+.removeEventBtn:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+.eventList time {
+  font-size: 11px;
+  color: var(--cyan);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.eventList strong {
+  font-size: 14px;
   color: var(--text);
+  line-height: 1.2;
+}
+
+.eventList span {
+  font-size: 13px;
+  color: var(--mint);
+  font-weight: 600;
+  font-family: monospace;
 }
 
 .lowerGrid {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  grid-template-columns: 1fr 1.2fr;
   gap: 12px;
-  margin-top: 12px;
-}
-
-.insightList {
-  display: grid;
-  gap: 8px;
-}
-
-.insightRow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px 12px;
-  padding: 10px;
-}
-
-.insightRow div:first-child {
-  display: grid;
-  gap: 3px;
-}
-
-.insightRow p {
-  grid-column: 1 / -1;
-  margin: 0;
-  color: #c8d8e8;
-  line-height: 1.45;
-}
-
-.signalBadge {
-  align-self: start;
-  padding: 5px 8px;
-  border: 1px solid rgba(124, 246, 210, 0.45);
-  border-radius: 8px;
-  color: var(--mint);
-  background: rgba(124, 246, 210, 0.08);
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.insightMeta {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.insightMeta span {
-  padding: 4px 7px;
-  border-radius: 8px;
-  background: rgba(79, 209, 255, 0.07);
-}
-
-.tableWrap {
-  overflow-x: auto;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-}
-
-th,
-td {
-  padding: 10px 8px;
-  border-bottom: 1px solid rgba(37, 54, 76, 0.72);
-  text-align: left;
-  white-space: nowrap;
-}
-
-th {
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-}
-
-td {
-  color: #d9eef8;
   font-size: 13px;
 }
 
-.warningStack {
-  display: grid;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.warningStack p {
-  margin: 0;
-  padding: 8px;
-  color: #ffd4ca;
-}
-
-.emptyLanding {
-  display: grid;
-  gap: 6px;
-  place-items: center;
-  min-height: 360px;
+th {
+  text-align: left;
   color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
 }
 
-.emptyLanding strong {
-  color: var(--text);
-}
-
-@media (max-width: 1100px) {
-  .topBar,
-  .workbench,
-  .lowerGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .commandGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .controlCluster {
-    justify-items: start;
-  }
-}
-
-@media (max-width: 720px) {
-  .appShell {
-    width: min(100vw - 20px, 1500px);
-    padding-top: 14px;
-  }
-
-  .uploadRail,
-  .commandGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .panelHead {
-    display: grid;
-  }
-
-  .dateInputs {
-    display: grid;
-    width: 100%;
-  }
-
-  .dateInputs input {
-    width: 100%;
-  }
-
-  .chartTooltip {
-    left: 10px;
-    right: 10px;
-    top: 10px;
-  }
+td {
+  padding: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }

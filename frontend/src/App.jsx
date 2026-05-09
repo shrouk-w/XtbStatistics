@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const BENCHMARK_COLORS = {
   sp500: "#4fd1ff",
   nasdaq: "#b78cff",
@@ -64,87 +64,134 @@ function filterByDate(series, startDate, endDate) {
   });
 }
 
-function parseCustomEvents(input) {
-  return input
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line, index) => {
-      const [rawDate, ...labelParts] = line.split("|");
-      const date = rawDate.trim();
-      const label = labelParts.join("|").trim() || "Event";
-      return /^\d{4}-\d{2}-\d{2}$/.test(date)
-        ? { key: `custom-${index}-${date}`, date, title: label, source: "custom" }
-        : null;
-    })
-    .filter(Boolean);
-}
-
-function buildSystemEvents(series) {
-  if (!series.length) {
-    return [];
-  }
-
+function buildPortfolioEvents(series, customEvents) {
+  if (!series.length) return [];
   const peak = series.reduce((best, point) =>
     Number(point.totalValue) > Number(best.totalValue) ? point : best
   );
-  const trough = series.reduce((best, point) =>
-    Number(point.totalValue) < Number(best.totalValue) ? point : best
-  );
-
-  let biggestMove = null;
-  for (let index = 1; index < series.length; index += 1) {
-    const previous = Number(series[index - 1].totalValue) || 0;
-    const current = Number(series[index].totalValue) || 0;
-    const change = current - previous;
-    if (!biggestMove || Math.abs(change) > Math.abs(biggestMove.change)) {
-      biggestMove = { date: series[index].date, change };
-    }
-  }
-
-  return [
+  
+  const systemEvents = [
     {
       key: "peak",
       date: peak.date,
       title: "Portfolio high",
       value: formatPln(peak.totalValue),
       source: "system",
+      order: 0,
+    },
+  ];
+
+  const mappedCustom = customEvents
+    .map(ce => {
+      const point = series.find(p => p.date === ce.date);
+      if (!point) return null;
+      return { ...ce, value: formatPln(point.totalValue), order: 100 };
+    })
+    .filter(Boolean);
+
+  return [...systemEvents, ...mappedCustom].sort((a, b) => a.order - b.order || b.date.localeCompare(a.date));
+}
+
+function buildProfitEvents(series, customEvents) {
+  if (!series.length) return [];
+  
+  const profitPeak = series.reduce((best, point) =>
+    Number(point.profitValue) > Number(best.profitValue) ? point : best
+  );
+  const profitTrough = series.reduce((best, point) =>
+    Number(point.profitValue) < Number(best.profitValue) ? point : best
+  );
+
+  let biggestProfitJump = null;
+  let biggestProfitDrop = null;
+
+  for (let index = 1; index < series.length; index += 1) {
+    const previous = Number(series[index - 1].profitValue) || 0;
+    const current = Number(series[index].profitValue) || 0;
+    const change = current - previous;
+    
+    if (change > 0) {
+      if (!biggestProfitJump || change > biggestProfitJump.change) {
+        biggestProfitJump = { date: series[index].date, change };
+      }
+    } else if (change < 0) {
+      if (!biggestProfitDrop || change < biggestProfitDrop.change) {
+        biggestProfitDrop = { date: series[index].date, change };
+      }
+    }
+  }
+
+  const systemEvents = [
+    {
+      key: "profit-peak",
+      date: profitPeak.date,
+      title: "Profit high",
+      value: formatPln(profitPeak.profitValue),
+      source: "system",
+      order: 0,
     },
     {
-      key: "trough",
-      date: trough.date,
-      title: "Portfolio low",
-      value: formatPln(trough.totalValue),
+      key: "profit-trough",
+      date: profitTrough.date,
+      title: "Profit low",
+      value: formatPln(profitTrough.profitValue),
       source: "system",
+      order: 1,
     },
-    biggestMove
+    biggestProfitJump
       ? {
-          key: "move",
-          date: biggestMove.date,
-          title: biggestMove.change >= 0 ? "Largest daily jump" : "Largest daily drawdown",
-          value: formatPln(biggestMove.change),
+          key: "profit-jump",
+          date: biggestProfitJump.date,
+          title: "Largest profit jump",
+          value: formatPln(biggestProfitJump.change),
           source: "system",
+          order: 2,
+        }
+      : null,
+    biggestProfitDrop
+      ? {
+          key: "profit-drop",
+          date: biggestProfitDrop.date,
+          title: "Largest profit drop",
+          value: formatPln(biggestProfitDrop.change),
+          source: "system",
+          order: 3,
         }
       : null,
   ].filter(Boolean);
+
+  const mappedCustom = customEvents
+    .map(ce => {
+      const point = series.find(p => p.date === ce.date);
+      if (!point) return null;
+      return { ...ce, value: formatPln(point.profitValue), order: 100 };
+    })
+    .filter(Boolean);
+
+  return [...systemEvents, ...mappedCustom].sort((a, b) => a.order - b.order || b.date.localeCompare(a.date));
 }
 
 function buildStats(series) {
   if (!series.length) {
-    return { current: 0, returnPercent: 0, drawdownPercent: 0, investedPercent: 0 };
+    return { current: 0, returnPercent: 0, drawdownPercent: 0, investedPercent: 0, avgDepositProfitPercent: 0 };
   }
 
   const first = Number(series[0].totalValue) || 0;
   const lastPoint = series[series.length - 1];
   const last = Number(lastPoint.totalValue) || 0;
   const holdingsValue = Number(lastPoint.holdingsValue) || 0;
+  const profitValue = Number(lastPoint.profitValue) || 0;
   const peak = Math.max(...series.map((point) => Number(point.totalValue) || 0));
+  
+  const avgDeposit = series.reduce((sum, p) => sum + (Number(p.externalCashFlow) || 0), 0) / series.length;
+  const avgDepositProfitPercent = avgDeposit > 0 ? (profitValue / avgDeposit) * 100 : 0;
 
   return {
     current: last,
     returnPercent: first ? ((last - first) / first) * 100 : 0,
     drawdownPercent: peak ? ((last - peak) / peak) * 100 : 0,
     investedPercent: last ? ((Number(holdingsValue) || 0) / last) * 100 : 0,
+    avgDepositProfitPercent,
   };
 }
 
@@ -224,14 +271,17 @@ function PortfolioChart({
   benchmarks,
   activeBenchmarks,
   events,
+  hoverIndex,
+  onHover,
   valueKey = "totalValue",
   benchmarkValueKey = "value",
   valueLabel = "Portfolio",
+  showZeroLine = true,
+  startAtZero = false,
 }) {
-  const [hoverIndex, setHoverIndex] = useState(null);
   const width = 1120;
   const height = 420;
-  const padding = 42;
+  const padding = 50; // Increased padding for axes
 
   if (!series.length) {
     return <div className="chartEmpty">No data in selected range.</div>;
@@ -254,16 +304,27 @@ function PortfolioChart({
       benchmark.series.map((point) => Number(point[benchmarkValueKey]) || 0)
     ),
   ];
-  const minValue = allValues.length ? Math.min(...allValues) : 0;
-  const maxValue = allValues.length ? Math.max(...allValues) : 1;
-  const range = maxValue - minValue || 1;
+  const rawMin = allValues.length ? Math.min(...allValues) : 0;
+  const rawMax = allValues.length ? Math.max(...allValues) : 1;
+  const rawRange = rawMax - rawMin;
+  const paddingVal = rawRange * 0.05 || 100;
+  
+  let floor = startAtZero ? 0 : Math.floor((rawMin - paddingVal) / 1000) * 1000;
+  let ceil = Math.ceil((rawMax + paddingVal) / 1000) * 1000;
+  let range = (ceil - floor) || 4000;
+  
+  // Adjust range to be multiple of 4000 for "nice" 25% steps
+  if (range % 4000 !== 0) {
+    range = Math.ceil(range / 4000) * 4000;
+    ceil = floor + range;
+  }
 
   function toPoint(point, index, length, pointValueKey = valueKey) {
     const x = padding + (index / Math.max(length - 1, 1)) * (width - padding * 2);
     const y =
       height -
       padding -
-      (((Number(point[pointValueKey]) || 0) - minValue) / range) * (height - padding * 2);
+      (((Number(point[pointValueKey]) || 0) - floor) / range) * (height - padding * 2);
     return { ...point, x, y };
   }
 
@@ -274,96 +335,164 @@ function PortfolioChart({
       toPoint(point, index, benchmark.series.length, benchmarkValueKey)
     ),
   }));
-  const hoverPoint = hoverIndex === null ? null : chartPoints[hoverIndex];
+  const hoverPoint = hoverIndex !== null && hoverIndex >= 0 && hoverIndex < chartPoints.length ? chartPoints[hoverIndex] : null;
 
   function handleMouseMove(event) {
-    if (!chartPoints.length) {
-      return;
-    }
-
+    if (!chartPoints.length) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    const localX = (event.clientX - rect.left) * (width / rect.width);
+    const ratio = clamp((localX - padding) / (width - padding * 2), 0, 1);
     const index = Math.round(ratio * (chartPoints.length - 1));
-    setHoverIndex(index);
+    onHover(index);
   }
 
-  function handleMouseLeave() {
-    setHoverIndex(null);
-  }
+  const zeroY = height - padding - ((0 - floor) / range) * (height - padding * 2);
+  const reallyShowZeroLine = showZeroLine && floor < 0 && ceil > 0;
 
   return (
     <div className="chartShell">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         className="chartSvg"
-        role="img"
-        aria-label="Portfolio chart"
         onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
+        onMouseLeave={() => onHover(null)}
       >
-        {[0.25, 0.5, 0.75].map((ratio) => {
-          const y = padding + (height - padding * 2) * ratio;
-          const value = maxValue - range * ratio;
+        {/* Y Grid & Labels */}
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+          const y = height - padding - (height - padding * 2) * ratio;
+          const val = floor + range * ratio;
           return (
-            <g key={ratio}>
-              <line x1={padding} x2={width - padding} y1={y} y2={y} className="gridLine" />
-              <text x={padding} y={y - 8} className="axisLabel">{formatPln(value)}</text>
+            <g key={`y-${ratio}`}>
+              <line x1={padding} x2={width - padding} y1={y} y2={y} stroke="rgba(255,255,255,0.1)" strokeDasharray="4 4" />
+              <text x={padding - 10} y={y + 4} textAnchor="end" fill="#8da2b8" fontSize="10">{formatPln(val)}</text>
             </g>
           );
         })}
+
+        {/* Zero Line */}
+        {reallyShowZeroLine && (
+          <g key="zero-line">
+            <line
+              x1={padding}
+              x2={width - padding}
+              y1={zeroY}
+              y2={zeroY}
+              stroke="#ff4d4d"
+              strokeWidth="1.5"
+              strokeDasharray="6 3"
+              opacity="0.8"
+            />
+            <text
+              x={padding - 10}
+              y={zeroY + 4}
+              textAnchor="end"
+              fill="#ff4d4d"
+              fontSize="11"
+              fontWeight="bold"
+            >
+              0,00 zł
+            </text>
+          </g>
+        )}
+
+        {/* X Grid & Labels (Dates) */}
+        {series.length > 1 && [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+           const idx = Math.floor(ratio * (series.length - 1));
+           const point = chartPoints[idx];
+           return (
+             <g key={`x-${ratio}`}>
+               <line x1={point.x} x2={point.x} y1={padding} y2={height - padding} stroke="rgba(255,255,255,0.05)" />
+               <text x={point.x} y={height - padding + 20} textAnchor="middle" fill="#8da2b8" fontSize="10">{formatDate(point.date)}</text>
+             </g>
+           );
+        })}
+
+        {/* Main Axes */}
+        <line x1={padding} x2={padding} y1={padding} y2={height - padding} stroke="#25364c" />
+        <line x1={padding} x2={width - padding} y1={height - padding} y2={height - padding} stroke="#25364c" />
 
         {benchmarkPoints.map((benchmark) => (
-          <path
-            key={benchmark.key}
-            d={linePath(benchmark.points)}
-            className="benchmarkLine"
-            stroke={benchmark.color}
-          />
+          <path key={benchmark.key} d={linePath(benchmark.points)} fill="none" stroke={benchmark.color} strokeWidth="1.5" opacity="0.6" />
         ))}
 
-        <path d={linePath(chartPoints)} className="portfolioLine" />
+        <path d={linePath(chartPoints)} fill="none" stroke="#ffffff" strokeWidth="3" />
 
         {events.map((event) => {
-          const index = series.findIndex((point) => point.date === event.date);
-          if (index < 0) {
-            return null;
-          }
-          const point = chartPoints[index];
+          const idx = series.findIndex((p) => p.date === event.date);
+          if (idx < 0) return null;
+          const p = chartPoints[idx];
           return (
             <g key={event.key}>
-              <line x1={point.x} x2={point.x} y1={padding} y2={height - padding} className="eventLine" />
-              <circle cx={point.x} cy={point.y} r="5" className={`eventDot ${event.source}`} />
-              <text x={clamp(point.x + 8, padding, width - 150)} y={clamp(point.y - 10, padding, height - padding)} className="eventLabel">
-                {event.title}
-              </text>
+              <line x1={p.x} x2={p.x} y1={padding} y2={height - padding} stroke="#ffd166" strokeDasharray="2 2" opacity="0.5" />
+              <circle cx={p.x} cy={p.y} r="5" fill="#ffd166" stroke="#070b12" strokeWidth="2" />
+              <rect x={p.x + 6} y={p.y - 20} width="80" height="16" rx="4" fill="rgba(7,11,18,0.8)" />
+              <text x={p.x + 10} y={p.y - 8} fill="#ffd166" fontSize="9" fontWeight="bold">{event.title}</text>
             </g>
           );
         })}
 
-        {hoverPoint ? (
+        {hoverPoint && (
           <g>
-            <line x1={hoverPoint.x} x2={hoverPoint.x} y1={padding} y2={height - padding} className="hoverLine" />
-            <circle cx={hoverPoint.x} cy={hoverPoint.y} r="6" className="hoverDot" />
+            <line x1={hoverPoint.x} x2={hoverPoint.x} y1={padding} y2={height - padding} stroke="#4fd1ff" strokeDasharray="4 2" />
+            <circle cx={hoverPoint.x} cy={hoverPoint.y} r="7" fill="#4fd1ff" stroke="#fff" strokeWidth="2" />
+            <circle cx={hoverPoint.x} cy={hoverPoint.y} r="12" fill="#4fd1ff" opacity="0.2" />
           </g>
-        ) : null}
+        )}
       </svg>
+    </div>
+  );
+}
 
-      {hoverPoint ? (
-        <div className="chartTooltip">
-          <strong>{formatDate(hoverPoint.date)}</strong>
-          <span>{valueLabel} {formatPln(hoverPoint[valueKey])}</span>
-          <span>Cash {formatPln(hoverPoint.cash)}</span>
-          <span>Holdings {formatPln(hoverPoint.holdingsValue)}</span>
-          {benchmarkPoints.map((benchmark) => {
-            const point = benchmark.series.find((item) => item.date === hoverPoint.date);
-            return point ? (
-              <span key={benchmark.key} style={{ color: benchmark.color }}>
-                {benchmark.label} {formatPln(point[benchmarkValueKey])}
-              </span>
-            ) : null;
-          })}
+function LiveTooltip({ 
+  hoverPoint, 
+  benchmarks, 
+  visibleSeries, 
+  valueKey, 
+  valueLabel, 
+  activeBenchmarks,
+  benchmarkValueKey = "value"
+}) {
+  const displayPoint = hoverPoint || (visibleSeries && visibleSeries.length > 0 ? visibleSeries[visibleSeries.length - 1] : null);
+
+  if (!displayPoint) {
+    return <div className="liveTooltip placeholder">Waiting for portfolio data...</div>;
+  }
+
+  const activeBenchmarkSeries = Object.entries(benchmarks ?? {})
+    .filter(([key]) => activeBenchmarks[key])
+    .map(([key, benchmark]) => {
+        const point = benchmark.series.find(p => p.date === displayPoint.date);
+        return point ? { ...benchmark, current: point, key } : null;
+    }).filter(Boolean);
+
+  return (
+    <div className={`liveTooltip ${hoverPoint ? "active" : "default"}`}>
+      <div className="tipDate">
+        <span>{hoverPoint ? formatDate(displayPoint.date) : "Latest: " + formatDate(displayPoint.date)}</span>
+      </div>
+      <div className="tipContent">
+        <div className="tipGroup">
+            <label>{valueLabel}</label>
+            <strong>{formatPln(displayPoint[valueKey])}</strong>
         </div>
-      ) : null}
+        <div className="tipGroup">
+            <label>Cash</label>
+            <strong>{formatPln(displayPoint.cash)}</strong>
+        </div>
+        <div className="tipGroup">
+            <label>Holdings</label>
+            <strong>{formatPln(displayPoint.holdingsValue)}</strong>
+        </div>
+      </div>
+      <div className="tipBenchmarks">
+        {activeBenchmarkSeries.length > 0 ? activeBenchmarkSeries.map(b => (
+            <div key={b.key} className="tipBenchRow">
+                <span className="dot" style={{ background: BENCHMARK_COLORS[b.key] }} />
+                <span className="label">{b.label}</span>
+                <strong>{formatPln(b.current[benchmarkValueKey])}</strong>
+            </div>
+        )) : <span className="noBenchmarks">Toggle benchmarks to compare</span>}
+      </div>
     </div>
   );
 }
@@ -402,42 +531,115 @@ export function App() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [customEventsText, setCustomEventsText] = useState("");
-  const [activeBenchmarks, setActiveBenchmarks] = useState({ sp500: true, gold: true });
+
+  // Portfolio Chart State
+  const [portfolioStart, setPortfolioStart] = useState("");
+  const [portfolioEnd, setPortfolioEnd] = useState("");
+  const [portfolioBenchmarks, setPortfolioBenchmarks] = useState({ sp500: true, gold: true });
+  const [portfolioHover, setPortfolioHover] = useState(null);
+
+  // Profit Chart State
+  const [profitStart, setProfitStart] = useState("");
+  const [profitEnd, setProfitEnd] = useState("");
+  const [profitBenchmarks, setProfitBenchmarks] = useState({ sp500: false, gold: false });
+  const [profitHover, setProfitHover] = useState(null);
+
+  // Event State
+  const [customEvents, setCustomEvents] = useState([]);
+  const [eventInput, setEventInput] = useState("");
+
+  // Manual Update State
+  const [manualDate, setManualDate] = useState(new Date().toISOString().slice(0, 10));
+  const [manualType, setManualType] = useState("Stock purchase");
+  const [manualSymbol, setManualSymbol] = useState("");
+  const [manualAmount, setManualAmount] = useState("");
+  const [manualPrice, setManualPrice] = useState("");
+  const [manualComment, setManualComment] = useState("");
+
+  useEffect(() => {
+    async function loadPortfolio() {
+      setLoading(true);
+      try {
+        const response = await fetch(`${API_BASE}/api/portfolio`);
+        if (response.ok) {
+          const payload = await response.json();
+          if (payload.series && payload.series.length > 0) {
+            setData(payload);
+            setPortfolioStart(payload.summary.startDate);
+            setPortfolioEnd(payload.summary.endDate);
+            setProfitStart(payload.summary.startDate);
+            setProfitEnd(payload.summary.endDate);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load portfolio from DB", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadPortfolio();
+  }, []);
 
   const series = data?.series ?? [];
-  const visibleSeries = useMemo(
-    () => filterByDate(series, startDate, endDate),
-    [series, startDate, endDate]
+
+  // Derived Portfolio Data
+  const visiblePortfolioSeries = useMemo(
+    () => filterByDate(series, portfolioStart, portfolioEnd),
+    [series, portfolioStart, portfolioEnd]
   );
-  const visibleBenchmarks = useMemo(() => {
+  const visiblePortfolioBenchmarks = useMemo(() => {
     const benchmarks = {};
     for (const [key, benchmark] of Object.entries(data?.benchmarks ?? {})) {
       benchmarks[key] = {
         ...benchmark,
-        series: filterByDate(benchmark.series, startDate, endDate),
+        series: filterByDate(benchmark.series, portfolioStart, portfolioEnd),
       };
     }
     return benchmarks;
-  }, [data, startDate, endDate]);
-  const systemEvents = useMemo(() => buildSystemEvents(visibleSeries), [visibleSeries]);
-  const customEvents = useMemo(() => parseCustomEvents(customEventsText), [customEventsText]);
-  const visibleEvents = useMemo(
-    () =>
-      [...systemEvents, ...customEvents].filter((event) =>
-        visibleSeries.some((point) => point.date === event.date)
-      ),
-    [systemEvents, customEvents, visibleSeries]
+  }, [data, portfolioStart, portfolioEnd]);
+
+  // Derived Profit Data
+  const visibleProfitSeries = useMemo(
+    () => filterByDate(series, profitStart, profitEnd),
+    [series, profitStart, profitEnd]
   );
-  const stats = useMemo(
-    () => buildStats(visibleSeries),
-    [visibleSeries]
+  const visibleProfitBenchmarksData = useMemo(() => {
+    const benchmarks = {};
+    for (const [key, benchmark] of Object.entries(data?.benchmarks ?? {})) {
+      benchmarks[key] = {
+        ...benchmark,
+        series: filterByDate(benchmark.series, profitStart, profitEnd),
+      };
+    }
+    return benchmarks;
+  }, [data, profitStart, profitEnd]);
+
+  const portfolioEvents = useMemo(() => buildPortfolioEvents(visiblePortfolioSeries, customEvents), [visiblePortfolioSeries, customEvents]);
+  const profitEvents = useMemo(() => buildProfitEvents(visibleProfitSeries, customEvents), [visibleProfitSeries, customEvents]);
+
+  const visiblePortfolioEvents = useMemo(
+    () =>
+      portfolioEvents.filter((event) =>
+        visiblePortfolioSeries.some((point) => point.date === event.date)
+      ),
+    [portfolioEvents, visiblePortfolioSeries]
   );
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  const visibleProfitEvents = useMemo(
+    () =>
+      profitEvents.filter((event) =>
+        visibleProfitSeries.some((point) => point.date === event.date)
+      ),
+    [profitEvents, visibleProfitSeries]
+  );
+
+  const stats = useMemo(
+    () => buildStats(visiblePortfolioSeries),
+    [visiblePortfolioSeries]
+  );
+
+  async function handleSubmit(event, persist = false) {
+    if (event) event.preventDefault();
     setError("");
 
     if (!files.length) {
@@ -447,6 +649,7 @@ export function App() {
 
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
+    formData.append("persist", persist);
 
     setLoading(true);
     try {
@@ -460,8 +663,14 @@ export function App() {
       }
       const payload = await response.json();
       setData(payload);
-      setStartDate(payload.summary.startDate);
-      setEndDate(payload.summary.endDate);
+      setPortfolioStart(payload.summary.startDate);
+      setPortfolioEnd(payload.summary.endDate);
+      setProfitStart(payload.summary.startDate);
+      setProfitEnd(payload.summary.endDate);
+      if (persist) {
+          alert("Portfolio synchronized and saved to database.");
+          setFiles([]); // Clear after sync
+      }
     } catch (submitError) {
       setError(submitError.message || "Wystapil blad podczas wysylki.");
       setData(null);
@@ -470,9 +679,76 @@ export function App() {
     }
   }
 
-  function toggleBenchmark(key) {
-    setActiveBenchmarks((current) => ({ ...current, [key]: !current[key] }));
+  async function handleManualSync(event) {
+      event.preventDefault();
+      setError("");
+      
+      const qty = parseFloat(manualAmount) || 0;
+      const price = parseFloat(manualPrice) || 0;
+      
+      let finalAmount = 0;
+      if (manualType.includes("Stock")) {
+          finalAmount = qty * price;
+      } else {
+          finalAmount = qty; // For Deposit/Withdrawal/Dividend qty is the main value
+      }
+
+      const payload = {
+          time: manualDate,
+          operation_type: manualType,
+          symbol: manualSymbol || null,
+          amount: finalAmount,
+          comment: manualType.includes("Stock") ? `Qty: ${qty}, Price: ${price} | ${manualComment}` : manualComment
+      };
+
+      setLoading(true);
+      try {
+          const response = await fetch(`${API_BASE}/api/portfolio/manual`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+          });
+          if (!response.ok) throw new Error("Manual sync failed.");
+          
+          // Reload portfolio
+          const getRes = await fetch(`${API_BASE}/api/portfolio`);
+          if (getRes.ok) setData(await getRes.json());
+          
+          setManualAmount("");
+          setManualPrice("");
+          setManualSymbol("");
+          setManualComment("");
+          alert("Manual operation added successfully.");
+      } catch (err) {
+          setError(err.message);
+      } finally {
+          setLoading(false);
+      }
   }
+
+  function handleAddEvent() {
+    if (!eventInput.trim()) return;
+    const [rawDate, ...labelParts] = eventInput.split("|");
+    const date = rawDate.trim();
+    const label = labelParts.join("|").trim() || "Event";
+    
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      setCustomEvents(prev => [
+        ...prev, 
+        { key: `custom-${Date.now()}`, date, title: label, source: "custom" }
+      ]);
+      setEventInput("");
+    } else {
+      setError("Invalid format. Use YYYY-MM-DD | Label");
+    }
+  }
+
+  function handleRemoveCustomEvent(key) {
+    setCustomEvents(prev => prev.filter(e => e.key !== key));
+  }
+
+  const portfolioHoverPoint = portfolioHover !== null ? visiblePortfolioSeries[portfolioHover] : null;
+  const profitHoverPoint = profitHover !== null ? visibleProfitSeries[profitHover] : null;
 
   return (
     <main className="appShell">
@@ -481,24 +757,50 @@ export function App() {
           <span className="brandMark">XTBX</span>
           <h1>Portfolio Command Center</h1>
         </div>
-        <form className="uploadRail" onSubmit={handleSubmit}>
-          <input
-            type="file"
-            accept=".xlsx"
-            multiple
-            onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
-          />
-          <button type="submit" disabled={loading}>{loading ? "Analyzing" : "Analyze"}</button>
-        </form>
+        
+        <div className="modernUploadControl">
+          <div className="fileInputWrapper">
+            <button className="selectFilesBtn" type="button" onClick={() => document.getElementById('hiddenFileInput').click()}>
+              Select files
+            </button>
+            <div className={`fileStatus ${files.length > 0 ? 'hasFiles' : ''}`}>
+              {files.length > 0 ? `${files.length} files selected` : "Drop XLSX reports here"}
+            </div>
+            <input
+              id="hiddenFileInput"
+              type="file"
+              accept=".xlsx"
+              multiple
+              style={{ display: 'none' }}
+              onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
+            />
+          </div>
+          <div className="uploadActionButtons">
+            <button 
+              className="actionBtn analyze" 
+              onClick={(e) => handleSubmit(e, false)} 
+              disabled={loading || !files.length}
+            >
+              Analyze
+            </button>
+            <button 
+              className="actionBtn sync" 
+              onClick={(e) => handleSubmit(e, true)} 
+              disabled={loading || !files.length}
+            >
+              Analyze & Sync
+            </button>
+          </div>
+        </div>
       </header>
 
-      {error ? <div className="statusError">{error}</div> : null}
+      {error ? <div className="statusError" onClick={() => setError("")}>{error}</div> : null}
 
       <section className="commandGrid">
         <div className="metricPanel">
           <span>Portfolio value</span>
           <strong>{formatPln(stats.current || data?.summary?.currentTotalValue || 0)}</strong>
-          <small>{visibleSeries.length ? `${formatDate(visibleSeries[0].date)} - ${formatDate(visibleSeries.at(-1).date)}` : "Upload XTB XLSX"}</small>
+          <small>{visiblePortfolioSeries.length ? `${formatDate(visiblePortfolioSeries[0].date)} - ${formatDate(visiblePortfolioSeries.at(-1).date)}` : "Upload XTB XLSX"}</small>
         </div>
         <div className="metricPanel">
           <span>Net deposits</span>
@@ -508,12 +810,56 @@ export function App() {
         <div className="metricPanel">
           <span>Total profit</span>
           <strong>{formatPln(data?.summary?.currentProfitValue || 0)}</strong>
-          <small>{formatPercent(data?.summary?.currentProfitPercent || 0)} vs deposits</small>
+          <small>
+            {formatPercent(data?.summary?.currentProfitPercent || 0)} total | {formatPercent(stats.avgDepositProfitPercent)} avg eff
+          </small>
         </div>
         <div className="metricPanel">
           <span>Market exposure</span>
           <strong>{formatPercent(stats.investedPercent)}</strong>
           <small>holdings / total</small>
+        </div>
+      </section>
+
+      <section className="manualUpdate">
+        <div className="updatePanel">
+          <div className="panelHead compact">
+            <div>
+              <span>Manual Entry</span>
+              <h2>Record Portfolio Change</h2>
+            </div>
+          </div>
+          <div className="manualTypeSelector">
+            {["Stock purchase", "Stock sale", "Dividend", "Deposit", "Withdrawal"].map((type) => (
+              <button
+                key={type}
+                type="button"
+                className={`typeBtn ${type.replace(" ", "").toLowerCase()} ${manualType === type ? "active" : ""}`}
+                onClick={() => setManualType(type)}
+              >
+                {type}
+              </button>
+            ))}
+          </div>
+          <form className="manualForm" onSubmit={handleManualSync}>
+            <input type="date" value={manualDate} onChange={e => setManualDate(e.target.value)} />
+            
+            {!(manualType === "Deposit" || manualType === "Withdrawal") ? (
+              <>
+                <input type="text" placeholder="Ticker (e.g. AAPL.US)" value={manualSymbol} onChange={e => setManualSymbol(e.target.value)} />
+                <input type="number" step="0.01" placeholder="Quantity" value={manualAmount} onChange={e => setManualAmount(e.target.value)} required />
+                <input type="number" step="0.01" placeholder="Price" value={manualPrice} onChange={e => setManualPrice(e.target.value)} />
+                <input type="text" placeholder="Comment" value={manualComment} onChange={e => setManualComment(e.target.value)} />
+              </>
+            ) : (
+              <>
+                <input type="number" step="0.01" placeholder="Value (PLN)" value={manualAmount} onChange={e => setManualAmount(e.target.value)} required />
+                <input type="text" placeholder="Comment" value={manualComment} onChange={e => setManualComment(e.target.value)} className="wideComment" />
+              </>
+            )}
+            
+            <button type="submit" disabled={loading} className="submitManualBtn">Add Record</button>
+          </form>
         </div>
       </section>
 
@@ -528,27 +874,42 @@ export function App() {
                 </div>
                 <RangeControls
                   data={data}
-                  startDate={startDate}
-                  endDate={endDate}
-                  onStartDate={setStartDate}
-                  onEndDate={setEndDate}
+                  startDate={portfolioStart}
+                  endDate={portfolioEnd}
+                  onStartDate={setPortfolioStart}
+                  onEndDate={setPortfolioEnd}
                 />
               </div>
 
-              <BenchmarkToggles
-                benchmarks={data.benchmarks}
-                active={activeBenchmarks}
-                onToggle={toggleBenchmark}
-              />
+              <div className="chartActionsRow">
+                <BenchmarkToggles
+                  benchmarks={data.benchmarks}
+                  active={portfolioBenchmarks}
+                  onToggle={(key) => setPortfolioBenchmarks(curr => ({ ...curr, [key]: !curr[key] }))}
+                />
+                <LiveTooltip 
+                    hoverPoint={portfolioHoverPoint} 
+                    benchmarks={data.benchmarks} 
+                    visibleSeries={visiblePortfolioSeries} 
+                    valueKey="totalValue" 
+                    valueLabel="Portfolio" 
+                    activeBenchmarks={portfolioBenchmarks}
+                    benchmarkValueKey="value"
+                />
+              </div>
 
               <PortfolioChart
-                series={visibleSeries}
-                benchmarks={visibleBenchmarks}
-                activeBenchmarks={activeBenchmarks}
-                events={visibleEvents}
+                series={visiblePortfolioSeries}
+                benchmarks={visiblePortfolioBenchmarks}
+                activeBenchmarks={portfolioBenchmarks}
+                events={visiblePortfolioEvents}
+                hoverIndex={portfolioHover}
+                onHover={setPortfolioHover}
                 valueKey="totalValue"
                 benchmarkValueKey="value"
                 valueLabel="Portfolio value"
+                showZeroLine={false}
+                startAtZero={portfolioStart === data?.summary?.startDate}
               />
             </div>
 
@@ -556,21 +917,31 @@ export function App() {
               <div className="panelHead compact">
                 <div>
                   <span>Event feed</span>
-                  <h2>Dates to pin</h2>
+                  <h2>Portfolio milestones</h2>
                 </div>
               </div>
-              <textarea
-                value={customEventsText}
-                onChange={(event) => setCustomEventsText(event.target.value)}
-                placeholder={"2024-02-01 | Fed decision\n2025-08-12 | Big rebalance"}
-              />
+              
+              <div className="eventAddBox">
+                <input 
+                  type="text" 
+                  value={eventInput}
+                  onChange={(e) => setEventInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddEvent()}
+                  placeholder="YYYY-MM-DD | Event Name"
+                />
+                <button onClick={handleAddEvent}>Add</button>
+              </div>
+
               <div className="eventList">
-                {visibleEvents.length ? (
-                  visibleEvents.map((event) => (
-                    <article key={event.key}>
+                {visiblePortfolioEvents.length ? (
+                  visiblePortfolioEvents.map((event) => (
+                    <article key={event.key} className={event.source === "custom" ? "customEvent" : ""}>
                       <time>{formatDate(event.date)}</time>
                       <strong>{event.title}</strong>
                       {event.value ? <span>{event.value}</span> : null}
+                      {event.source === "custom" && (
+                        <button className="removeEventBtn" onClick={() => handleRemoveCustomEvent(event.key)} title="Remove event">×</button>
+                      )}
                     </article>
                   ))
                 ) : (
@@ -580,22 +951,75 @@ export function App() {
             </aside>
           </section>
 
-          <section className="profitPanel">
-            <div className="panelHead compact">
-              <div>
-                <span>Clean performance</span>
-                <h2>Profit curve without deposit jumps</h2>
+          <section className="workbench profitSection">
+            <div className="chartPanel">
+              <div className="panelHead compact">
+                <div>
+                  <span>Clean performance</span>
+                  <h2>Profit curve (Zysk/Strata)</h2>
+                </div>
+                <RangeControls
+                  data={data}
+                  startDate={profitStart}
+                  endDate={profitEnd}
+                  onStartDate={setProfitStart}
+                  onEndDate={setProfitEnd}
+                />
               </div>
+              
+              <div className="chartActionsRow">
+                <BenchmarkToggles
+                  benchmarks={data.benchmarks}
+                  active={profitBenchmarks}
+                  onToggle={(key) => setProfitBenchmarks(curr => ({ ...curr, [key]: !curr[key] }))}
+                />
+                <LiveTooltip 
+                    hoverPoint={profitHoverPoint} 
+                    benchmarks={data.benchmarks} 
+                    visibleSeries={visibleProfitSeries} 
+                    valueKey="profitValue" 
+                    valueLabel="Profit/Loss" 
+                    activeBenchmarks={profitBenchmarks}
+                    benchmarkValueKey="profitValue"
+                />
+              </div>
+
+              <PortfolioChart
+                series={visibleProfitSeries}
+                benchmarks={visibleProfitBenchmarksData}
+                activeBenchmarks={profitBenchmarks}
+                events={visibleProfitEvents}
+                hoverIndex={profitHover}
+                onHover={setProfitHover}
+                valueKey="profitValue"
+                benchmarkValueKey="profitValue"
+                valueLabel="Profit/Loss"
+              />
             </div>
-            <PortfolioChart
-              series={visibleSeries}
-              benchmarks={visibleBenchmarks}
-              activeBenchmarks={activeBenchmarks}
-              events={visibleEvents}
-              valueKey="profitValue"
-              benchmarkValueKey="profitValue"
-              valueLabel="Portfolio P/L"
-            />
+            <aside className="sidePanel">
+              <div className="panelHead compact">
+                <div>
+                  <span>Profit feed</span>
+                  <h2>P/L Milestones</h2>
+                </div>
+              </div>
+              <div className="eventList">
+                {visibleProfitEvents.length ? (
+                  visibleProfitEvents.map((event) => (
+                    <article key={event.key} className={event.source === "custom" ? "customEvent" : ""}>
+                      <time>{formatDate(event.date)}</time>
+                      <strong>{event.title}</strong>
+                      {event.value ? <span>{event.value}</span> : null}
+                      {event.source === "custom" && (
+                        <button className="removeEventBtn" onClick={() => handleRemoveCustomEvent(event.key)} title="Remove event">×</button>
+                      )}
+                    </article>
+                  ))
+                ) : (
+                  <p>No profit events inside range.</p>
+                )}
+              </div>
+            </aside>
           </section>
 
           <section className="lowerGrid">
