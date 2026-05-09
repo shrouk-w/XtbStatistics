@@ -5,6 +5,7 @@ import math
 import mimetypes
 import os
 import re
+import time as time_module
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -14,7 +15,7 @@ from typing import Any
 import pandas as pd
 import httpx
 import yfinance as yf
-from fastapi import FastAPI, File, HTTPException, UploadFile, Depends
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -90,6 +91,15 @@ class ManualOperation(BaseModel):
     amount: float
     comment: str | None = None
 
+_portfolio_cache: dict[str, Any] = {"value": None, "expires_at": 0.0}
+_PORTFOLIO_CACHE_TTL = 300  # seconds
+
+
+def _invalidate_portfolio_cache() -> None:
+    _portfolio_cache["value"] = None
+    _portfolio_cache["expires_at"] = 0.0
+
+
 def create_app() -> FastAPI:
     init_db()
     app = FastAPI(title="XTB Portfolio History")
@@ -116,10 +126,16 @@ def create_app() -> FastAPI:
         )
         db.add(new_op)
         db.commit()
+        _invalidate_portfolio_cache()
         return {"status": "success"}
 
     @app.get("/api/portfolio")
     async def get_portfolio(db: Session = Depends(get_db)) -> dict[str, Any]:
+        # Serve from in-memory cache when fresh — yfinance + FX fetches are ~8s
+        now = time_module.time()
+        cached = _portfolio_cache["value"]
+        if cached is not None and _portfolio_cache["expires_at"] > now:
+            return cached
         # Fetch from DB
         db_cash = db.query(CashOperation).all()
         db_pending = db.query(PendingOrder).all()
@@ -164,15 +180,20 @@ def create_app() -> FastAPI:
 
         if not cash_events and not position_events:
             print("DEBUG: No data found in database.")
-            return {"summary": {}, "series": [], "holdings": [], "benchmarks": {}, "warnings": ["No data in database."]}
+            empty = {"summary": {}, "series": [], "holdings": [], "benchmarks": {}, "warnings": ["No data in database."]}
+            _portfolio_cache["value"] = empty
+            _portfolio_cache["expires_at"] = now + _PORTFOLIO_CACHE_TTL
+            return empty
 
         portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events)
+        _portfolio_cache["value"] = portfolio
+        _portfolio_cache["expires_at"] = now + _PORTFOLIO_CACHE_TTL
         return portfolio
 
     @app.post("/api/portfolio/analyze")
     async def analyze_portfolio(
         files: list[UploadFile] = File(...),
-        persist: bool = False,
+        persist: bool = Form(False),
         db: Session = Depends(get_db)
     ) -> dict[str, Any]:
         if not files:
@@ -248,6 +269,7 @@ def create_app() -> FastAPI:
         if persist:
             try:
                 db.commit()
+                _invalidate_portfolio_cache()
             except Exception as e:
                 db.rollback()
                 warnings.append(f"Database sync failed: {str(e)}")
