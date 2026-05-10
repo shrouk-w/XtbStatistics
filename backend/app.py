@@ -75,70 +75,182 @@ mimetypes.add_type("application/javascript", ".mjs")
 
 @dataclass
 class PositionEvent:
-    ticker: str; yahoo_ticker: str; quantity_delta: float; trade_date: date
+    ticker: str
+    yahoo_ticker: str
+    quantity_delta: float
+    trade_date: date
 
 @dataclass
 class CashEvent:
-    event_date: date; amount: float; operation_type: str
+    event_date: date
+    amount: float
+    operation_type: str
 
 from pydantic import BaseModel
+
 class ManualOperation(BaseModel):
-    time: str; operation_type: str; symbol: str | None = None; amount: float; comment: str | None = None
+    time: str # YYYY-MM-DD
+    operation_type: str
+    symbol: str | None = None
+    amount: float
+    comment: str | None = None
 
 def create_app() -> FastAPI:
-    init_db(); app = FastAPI(title="XTB Portfolio History")
-    app.add_middleware(CORSMiddleware, allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+    init_db()
+    app = FastAPI(title="XTB Portfolio History")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     @app.get("/api/health")
-    def health(): return {"status": "ok"}
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
     @app.post("/api/portfolio/manual")
     async def add_manual_operation(op: ManualOperation, db: Session = Depends(get_db)):
-        new_op = CashOperation(operation_type=op.operation_type, symbol=op.symbol, time=datetime.strptime(op.time, "%Y-%m-%d"), amount=op.amount, comment=op.comment)
-        db.add(new_op); db.commit(); return {"status": "success"}
+        new_op = CashOperation(
+            operation_type=op.operation_type,
+            symbol=op.symbol,
+            time=datetime.strptime(op.time, "%Y-%m-%d"),
+            amount=op.amount,
+            comment=op.comment
+        )
+        db.add(new_op)
+        db.commit()
+        return {"status": "success"}
+
     @app.get("/api/portfolio")
-    async def get_portfolio(db: Session = Depends(get_db)):
-        db_cash = db.query(CashOperation).all(); db_pending = db.query(PendingOrder).all()
-        cash_events = []; external_cash_events = []; trade_cash_events = []; position_events = []
+    async def get_portfolio(db: Session = Depends(get_db)) -> dict[str, Any]:
+        # Fetch from DB
+        db_cash = db.query(CashOperation).all()
+        db_pending = db.query(PendingOrder).all()
+        
+        cash_events: list[CashEvent] = []
+        external_cash_events: list[tuple[date, float]] = []
+        trade_cash_events: list[tuple[date, float]] = []
+        position_events: list[PositionEvent] = []
+
         for op in db_cash:
-            ed = op.time.date(); cash_events.append(CashEvent(event_date=ed, amount=op.amount, operation_type=op.operation_type))
-            otr = str(op.operation_type or "").strip().lower()
-            if otr in {"stock purchase", "stock sale", "stock sell"}: trade_cash_events.append((ed, op.amount))
-            elif is_external_cash_operation(otr): external_cash_events.append((ed, op.amount))
-            if otr in {"stock purchase", "stock sale", "stock sell"}:
-                qty = extract_quantity(op.comment)
-                if qty: position_events.append(PositionEvent(ticker=op.symbol, yahoo_ticker=to_yahoo_symbol(op.symbol), quantity_delta=qty if otr == "stock purchase" else -qty, trade_date=ed))
+            event_date = op.time.date()
+            cash_events.append(CashEvent(event_date=event_date, amount=op.amount, operation_type=op.operation_type))
+            
+            # Normalize operation types from DB
+            op_type_raw = str(op.operation_type or "").strip().lower()
+            
+            if op_type_raw in {"stock purchase", "stock sale", "stock sell"}:
+                trade_cash_events.append((event_date, op.amount))
+            elif is_external_cash_operation(op_type_raw):
+                external_cash_events.append((event_date, op.amount))
+            
+            # If it's a purchase/sell, we need quantity deltas
+            if op_type_raw in {"stock purchase", "stock sale", "stock sell"}:
+                quantity = extract_quantity(op.comment)
+                if quantity:
+                    delta = quantity if op_type_raw == "stock purchase" else -quantity
+                    position_events.append(
+                        PositionEvent(
+                            ticker=op.symbol,
+                            yahoo_ticker=to_yahoo_symbol(op.symbol),
+                            quantity_delta=delta,
+                            trade_date=event_date,
+                        )
+                    )
+
+        # Include Pending Orders Margin as tied up cash (negative impact on available cash)
         for order in db_pending:
-            if order.margin: cash_events.append(CashEvent(event_date=order.open_time.date(), amount=-float(order.margin), operation_type="Pending Order Margin"))
-        if not cash_events and not position_events: return {"summary": {}, "series": [], "holdings": [], "benchmarks": {}, "warnings": ["No data in database."]}
-        return build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events, db)
+            if order.margin:
+                event_date = order.open_time.date()
+                # Assuming margin is positive in DB, it subtracts from available cash
+                cash_events.append(CashEvent(event_date=event_date, amount=-float(order.margin), operation_type="Pending Order Margin"))
+
+        if not cash_events and not position_events:
+            return {"summary": {}, "series": [], "holdings": [], "benchmarks": {}, "warnings": ["No data in database."]}
+
+        portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events, db)
+        return portfolio
+
     @app.post("/api/portfolio/analyze")
-    async def analyze_portfolio(files: list[UploadFile] = File(...), persist: bool = False, db: Session = Depends(get_db)):
-        ce = []; ece = []; tce = []; pe = []; ws = []
+    async def analyze_portfolio(
+        files: list[UploadFile] = File(...),
+        persist: bool = False,
+        db: Session = Depends(get_db)
+    ) -> dict[str, Any]:
+        if not files:
+            raise HTTPException(status_code=400, detail="No files uploaded.")
+
+        cash_events: list[CashEvent] = []
+        external_cash_events: list[tuple[date, float]] = []
+        trade_cash_events: list[tuple[date, float]] = []
+        position_events: list[PositionEvent] = []
+        warnings: list[str] = []
+
         for upload in files:
-            fn = upload.filename or "uploaded.xlsx"
-            if not fn.lower().endswith(".xlsx"): ws.append(f"Skipped unsupported file: {fn}"); continue
-            payload = await upload.read(); parsed = parse_xtb_workbook(payload, fn)
-            ce.extend(parsed["cash_events"]); ece.extend(parsed["external_cash_events"]); tce.extend(parsed["trade_cash_events"]); pe.extend(parsed["position_events"]); ws.extend(parsed["warnings"])
+            filename = upload.filename or "uploaded.xlsx"
+            if not filename.lower().endswith(".xlsx"):
+                warnings.append(f"Skipped unsupported file: {filename}")
+                continue
+
+            payload = await upload.read()
+            parsed = parse_xtb_workbook(payload, filename)
+            cash_events.extend(parsed["cash_events"])
+            external_cash_events.extend(parsed["external_cash_events"])
+            trade_cash_events.extend(parsed["trade_cash_events"])
+            position_events.extend(parsed["position_events"])
+            warnings.extend(parsed["warnings"])
+
             if persist:
-                wb = load_workbook(io.BytesIO(payload), data_only=True)
-                if "Cash Operations" in wb.sheetnames:
-                    for row in wb["Cash Operations"].iter_rows(min_row=6, values_only=True):
+                workbook = load_workbook(io.BytesIO(payload), data_only=True)
+                
+                # Persistence for Cash Operations
+                if "Cash Operations" in workbook.sheetnames:
+                    sheet = workbook["Cash Operations"]
+                    for row in sheet.iter_rows(min_row=6, values_only=True):
                         if not row or not row[0]: continue
-                        op = CashOperation(operation_type=str(row[0]).strip(), symbol=(row[1] or "").strip(), time=row[3] if isinstance(row[3], datetime) else None, amount=float(row[4]) if row[4] is not None else 0.0, comment=(row[6] or "").strip())
-                        if op.time: db.add(op)
-                psn = next((s for s in wb.sheetnames if "PENDING ORDERS" in s.upper()), None)
-                if psn:
-                    for row in wb[psn].iter_rows(min_row=9, values_only=True):
+                        op = CashOperation(
+                            operation_type=str(row[0]).strip(),
+                            symbol=(row[1] or "").strip(),
+                            time=row[3] if isinstance(row[3], datetime) else None,
+                            amount=float(row[4]) if row[4] is not None else 0.0,
+                            comment=(row[6] or "").strip()
+                        )
+                        if op.time:
+                            db.add(op)
+
+                # Persistence for Pending Orders
+                pending_sheet_name = next((s for s in workbook.sheetnames if "PENDING ORDERS" in s.upper()), None)
+                if pending_sheet_name:
+                    sheet = workbook[pending_sheet_name]
+                    for row in sheet.iter_rows(min_row=9, values_only=True):
                         if not row or row[0] is None: continue
                         try:
-                            order = PendingOrder(order_id=row[0], symbol=row[1], margin=float(row[5]) if row[5] is not None else 0.0, open_time=row[12] if isinstance(row[12], datetime) else None)
-                            if order.order_id: db.merge(order)
+                            order = PendingOrder(
+                                order_id=row[0],
+                                symbol=row[1],
+                                margin=float(row[5]) if row[5] is not None else 0.0,
+                                open_time=row[12] if isinstance(row[12], datetime) else None
+                            )
+                            if order.order_id:
+                                db.merge(order)
                         except: continue
+
         if persist:
-            try: db.commit()
-            except Exception as e: db.rollback(); ws.append(f"Database sync failed: {str(e)}")
-        if not ce and not pe: raise HTTPException(status_code=400, detail="No XTB transactions found.")
-        portfolio = build_portfolio_history(ce, ece, tce, pe, db)
-        portfolio["warnings"].extend(ws); return portfolio
+            try:
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                warnings.append(f"Database sync failed: {str(e)}")
+
+        if not cash_events and not position_events:
+            raise HTTPException(status_code=400, detail="No XTB transactions found in uploaded files.")
+
+        portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events, db)
+        portfolio["warnings"].extend(warnings)
+        return portfolio
+
     frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
     if frontend_dist.exists():
         app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
