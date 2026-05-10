@@ -25,7 +25,7 @@ Po uruchomieniu otworz `http://127.0.0.1:5173`.
 
 ## Konfiguracja i Źródła Danych
 
-### 🔑 Klucz API Stooq (WIG20 i Fallback)
+### Klucz API Stooq (WIG20 i Fallback)
 
 Aplikacja wykorzystuje hybrydowy system pobierania danych. Aby zapewnić pełną historię indeksu **WIG20** oraz stabilne notowania polskich akcji w przypadku blokad Yahoo Finance, zalecane jest użycie darmowego klucza API z serwisu Stooq.pl.
 

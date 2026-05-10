@@ -797,6 +797,14 @@ export function App() {
 
       {error ? <div className="statusError" onClick={() => setError("")}>{error}</div> : null}
 
+      {data?.warnings?.some(w => w.startsWith("STOOQ_API_ERROR")) && (
+        <div className="statusError apiWarning">
+          {data.warnings.find(w => w.startsWith("STOOQ_API_ERROR")).replace("STOOQ_API_ERROR: ", "")}
+          <br />
+          <small>Sprawdź README.md, aby dowiedzieć się jak odświeżyć klucz.</small>
+        </div>
+      )}
+
       <section className="commandGrid">
         <div className="metricPanel">
           <span>Portfolio value</span>

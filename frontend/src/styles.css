@@ -197,12 +197,27 @@ h2 {
 }
 
 .statusError {
-  margin-bottom: 16px;
-  padding: 12px 14px;
-  border: 1px solid rgba(255, 122, 89, 0.5);
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border: 1px solid var(--red);
   border-radius: 8px;
-  background: rgba(255, 122, 89, 0.1);
-  color: #ffd4ca;
+  background: rgba(255, 77, 77, 0.1);
+  color: var(--red);
+  text-align: center;
+  font-size: 14px;
+}
+
+.apiWarning {
+  background: rgba(255, 77, 77, 0.2);
+  border-color: #ff4d4d;
+  color: #ffb3b3;
+  cursor: default;
+}
+
+.apiWarning small {
+  display: block;
+  margin-top: 4px;
+  opacity: 0.8;
 }
 
 .commandGrid {
@@ -723,4 +738,18 @@ th {
 td {
   padding: 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.warningStack {
+    margin-top: 16px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+}
+
+.warningStack p {
+    margin: 4px 0;
+    font-size: 12px;
+    color: var(--gold);
 }
