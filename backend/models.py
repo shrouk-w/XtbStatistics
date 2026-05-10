@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime
 
 Base = declarative_base()
 
@@ -70,3 +71,10 @@ class PendingOrder(Base):
     sl = Column(Float)
     tp = Column(Float)
     open_time = Column(DateTime)
+
+class LatestPrice(Base):
+    __tablename__ = 'latest_prices'
+    symbol = Column(String, primary_key=True)
+    price = Column(Float)
+    currency = Column(String)
+    last_updated = Column(DateTime, default=datetime.utcnow)
