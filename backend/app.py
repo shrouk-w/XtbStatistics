@@ -383,15 +383,18 @@ def fetch_stooq_price(s) -> float | None:
 def fetch_stooq_history(s) -> pd.Series:
     ak = os.getenv("STOOQ_API_KEY")
     if not ak: return pd.Series(dtype=float)
-    u = f"https://stooq.pl/q/d/l/?s={s.lower()}&i=d&apikey={ak}"
+    ss = YAHOO_TO_STOOQ_MAP.get(s, s.replace(".WA", "").replace(".PL", ""))
+    u = f"https://stooq.pl/q/d/l/?s={ss.lower()}&i=d&apikey={ak}"
     try:
         r = httpx.get(u, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15.0)
         if r.status_code == 200:
             if "Uzyskaj apikey" in r.text: return pd.Series(dtype=float)
             df = pd.read_csv(io.StringIO(r.text))
-            if 'Data' in df.columns and 'Zamkniecie' in df.columns:
-                df['Data'] = pd.to_datetime(df['Data']); df = df.set_index('Data')
-                return df['Zamkniecie'].astype(float).sort_index()
+            date_col = 'Data' if 'Data' in df.columns else 'Date'
+            close_col = 'Zamkniecie' if 'Zamkniecie' in df.columns else 'Close'
+            if date_col in df.columns and close_col in df.columns:
+                df[date_col] = pd.to_datetime(df[date_col]); df = df.set_index(date_col)
+                return df[close_col].astype(float).sort_index()
     except: pass
     return pd.Series(dtype=float)
 
@@ -420,12 +423,17 @@ def build_price_frame(qdf, sd, ed, db) -> tuple[pd.DataFrame, pd.DataFrame, dict
     
     if STOOQ_KEY_ERROR:
         ws.append(STOOQ_KEY_ERROR)
-    yts = qdf.columns.tolist(); uts = sorted(list(set(t for t in yts if t))); lq = qdf.iloc[-1]; ats = [t for t in uts if lq[t] > 1e-6]; bts = [b["symbol"] for b in BENCHMARKS.values()]; atf = list(set(ats) | set(bts))
+    
+    uts = sorted(list(set(qdf.columns.tolist()) | {b["symbol"] for b in BENCHMARKS.values()}))
     for t in uts: cm[t] = resolve_currency(t)
+    
     data = pd.DataFrame()
-    if atf:
-        try: data = yf.download(atf, start=sd.isoformat(), end=(ed + timedelta(days=1)).isoformat(), auto_adjust=False, progress=False, group_by="column", threads=True)
-        except: pass
+    try:
+        print(f"DEBUG: Attempting Yahoo bulk download for {len(uts)} symbols...")
+        data = yf.download(uts, start=sd.isoformat(), end=(ed + timedelta(days=1)).isoformat(), auto_adjust=False, progress=False, group_by="column", threads=True)
+    except:
+        print("DEBUG: Yahoo bulk download FAILED.")
+    
     ucs = set(cm.values()) - {"PLN"}; frs = {}
     for c in ucs:
         r = get_investing_fx(c)
@@ -437,47 +445,75 @@ def build_price_frame(qdf, sd, ed, db) -> tuple[pd.DataFrame, pd.DataFrame, dict
             lp = db.query(LatestPrice).filter(LatestPrice.symbol == c).first()
             if lp: frs[c] = lp.price
             else: frs[c] = {"USD": 4.0, "EUR": 4.3, "GBP": 5.0}.get(c, 1.0); ws.append(f"FX Fallback for {c}")
+
+    bts = [b["symbol"] for b in BENCHMARKS.values()]
     for bt in bts:
         h = pd.Series(dtype=float)
         if not data.empty:
             try:
-                if len(atf) > 1:
+                if len(uts) > 1:
                     if "Close" in data.columns: h = data["Close"][bt]
                     elif ("Close", bt) in data.columns: h = data[("Close", bt)]
                 else:
                     if "Close" in data.columns: h = data["Close"]
             except: pass
-        if h.empty or bt == "WIG20.WA":
-            sp = fetch_stooq_price(bt)
-            if sp: h = pd.Series(sp, index=idx)
+        
+        if h.empty or h.isnull().all() or bt == "WIG20.WA":
+            print(f"DEBUG: Yahoo failed for benchmark {bt}. Trying Stooq history...")
+            sh = fetch_stooq_history(bt)
+            if not sh.empty:
+                print(f"DEBUG: Stooq history SUCCESS for {bt} ({len(sh)} points)")
+                h = sh
+            else:
+                print(f"DEBUG: Stooq history FAILED for {bt}. Trying single price...")
+                sp = fetch_stooq_price(bt)
+                if sp:
+                    print(f"DEBUG: Stooq single price SUCCESS for {bt}: {sp}")
+                    h = pd.Series(sp, index=idx)
+        
         if not h.empty and not h.isnull().all():
             cv = float(h.iloc[-1])
             if cv > 0:
                 lp = db.query(LatestPrice).filter(LatestPrice.symbol == bt).first()
                 if not lp: lp = LatestPrice(symbol=bt); db.add(lp)
                 lp.price = cv; lp.currency = "INDEX" if bt.startswith("^") or "WIG" in bt else "USD"; lp.last_updated = datetime.utcnow()
+
     xrm = {}
     for o in db.query(OpenPosition).all(): xrm[to_yahoo_symbol(o.symbol)] = o.symbol
     for c in db.query(ClosedPosition).all(): xrm[to_yahoo_symbol(c.symbol)] = c.symbol
+    
     for t in uts:
+        if t in bts: continue
         h = pd.Series(dtype=float)
-        if not data.empty and t in ats:
+        if not data.empty:
             try:
-                if len(atf) > 1:
+                if len(uts) > 1:
                     if "Close" in data.columns: h = data["Close"][t]
                     elif ("Close", t) in data.columns: h = data[("Close", t)]
                 else:
                     if "Close" in data.columns: h = data["Close"]
             except: pass
-        if (h.empty or h.isnull().all()) and t in ats:
-            sp = fetch_stooq_price(t)
-            if sp: h = pd.Series(sp, index=idx)
+        
+        if h.empty or h.isnull().all():
+            print(f"DEBUG: Yahoo failed for ticker {t}. Trying Stooq history...")
+            sh = fetch_stooq_history(t)
+            if not sh.empty:
+                print(f"DEBUG: Stooq history SUCCESS for {t} ({len(sh)} points)")
+                h = sh
+            else:
+                print(f"DEBUG: Stooq history FAILED for {t}. Trying single price...")
+                sp = fetch_stooq_price(t)
+                if sp:
+                    print(f"DEBUG: Stooq single price SUCCESS for {t}: {sp}")
+                    h = pd.Series(sp, index=idx)
+        
         if not h.empty and not h.isnull().all():
             cv = float(h.iloc[-1])
             if cv > 0:
                 lp = db.query(LatestPrice).filter(LatestPrice.symbol == t).first()
                 if not lp: lp = LatestPrice(symbol=t); db.add(lp)
                 lp.price = cv; lp.currency = cm.get(t); lp.last_updated = datetime.utcnow()
+        
         if h.empty or h.isnull().all():
             lp = db.query(LatestPrice).filter(LatestPrice.symbol == t).first()
             if lp and lp.price: h = pd.Series(lp.price, index=idx)
@@ -487,9 +523,11 @@ def build_price_frame(qdf, sd, ed, db) -> tuple[pd.DataFrame, pd.DataFrame, dict
                 if mp > 0: h = pd.Series(mp, index=idx)
                 elif cp > 0: h = pd.Series(cp, index=idx)
                 else: h = pd.Series(0.0, index=idx)
+        
         h = h.reindex(idx).ffill().bfill().fillna(0.0); ops[t] = h.round(6); c = cm[t]
         if c != "PLN": ps[t] = (h * frs.get(c, 1.0)).round(6)
         else: ps[t] = h.round(6)
+    
     try: db.commit()
     except: db.rollback()
     return ps.fillna(0.0), ops.fillna(0.0), cm, ws
@@ -535,13 +573,24 @@ def build_benchmark_series(sd, ed, idx, tce, db) -> tuple[dict[str, Any], list[s
     for d, a in tce: tcb[d] = tcb.get(d, 0.0) + float(a)
     for k, cfg in BENCHMARKS.items():
         s = cfg["symbol"]; h = pd.Series(dtype=float)
-        if k == "wig20": h = fetch_stooq_history("wig20")
-        if h.empty: h = download_close_series(s, sd, ed)
+        print(f"DEBUG: Building benchmark {k} ({s})...")
+        h = fetch_stooq_history(s)
         if h.empty:
+            print(f"DEBUG: Stooq history empty for benchmark {s}. Trying Yahoo...")
+            h = download_close_series(s, sd, ed)
+        else:
+            print(f"DEBUG: Stooq history SUCCESS for benchmark {s} ({len(h)} points)")
+            
+        if h.empty:
+            print(f"DEBUG: Yahoo failed for benchmark {s}. Trying LatestPrice...")
             lp = db.query(LatestPrice).filter(LatestPrice.symbol == s).first()
             if lp and lp.price: h = pd.Series(lp.price, index=idx)
             else: ws.append(f"No benchmark history for {cfg['label']}"); continue
-        h = h.reindex(idx).ffill().bfill(); fp = float(h[h > 0].iloc[0]) if not h[h > 0].empty else 0.0
+        
+        h = h.reindex(idx).ffill().bfill()
+        print(f"DEBUG: Final benchmark series for {s} has {len(h)} points and last value {h.iloc[-1] if not h.empty else 'N/A'}")
+        
+        fp = float(h[h > 0].iloc[0]) if not h[h > 0].empty else 0.0
         if math.isclose(fp, 0.0, abs_tol=1e-12): ws.append(f"Benchmark {cfg['label']} has no usable starting price."); continue
         sh = 0.0; ni = 0.0; vs = []; ivs = []; pvs = []
         for ts, p in h.items():
