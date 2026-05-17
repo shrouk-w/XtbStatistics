@@ -339,7 +339,7 @@ def build_portfolio_history(ce, ece, tce, pe, db) -> dict[str, Any]:
     tv = cs.add(hv, fill_value=0.0); pv = tv.subtract(ecs, fill_value=0.0)
     rdf = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"), "cash": cs.round(2), "holdingsValue": hv.round(2), "totalValue": tv.round(2), "externalCashFlow": ecs.round(2), "profitValue": pv.round(2)})
     sm = {"startDate": rdf.iloc[0]["date"], "endDate": rdf.iloc[-1]["date"], "currentCash": round(float(cs.iloc[-1]), 2), "currentHoldingsValue": round(float(hv.iloc[-1]), 2), "currentTotalValue": round(float(tv.iloc[-1]), 2), "currentProfitValue": round(float(pv.iloc[-1]), 2), "netExternalCashFlow": round(float(ecs.iloc[-1]), 2), "currentProfitPercent": round((float(pv.iloc[-1]) / float(ecs.iloc[-1])) * 100, 2) if not math.isclose(float(ecs.iloc[-1]), 0.0, abs_tol=1e-9) else 0.0, "peakValue": round(float(tv.max()), 2), "lowestValue": round(float(tv.min()), 2)}
-    bs, bws = build_benchmark_series(sd, ed, idx, tce, db)
+    bs, bws = build_benchmark_series(sd, ed, idx, ece, db)
     ws.extend(bws); return {"summary": sm, "series": rdf.to_dict(orient="records"), "holdings": ch, "benchmarks": bs, "warnings": ws}
 
 def build_quantities_frame(pe, idx) -> pd.DataFrame:
@@ -595,8 +595,10 @@ def build_benchmark_series(sd, ed, idx, tce, db) -> tuple[dict[str, Any], list[s
         sh = 0.0; ni = 0.0; vs = []; ivs = []; pvs = []
         for ts, p in h.items():
             ea = tcb.get(ts.date(), 0.0); p = float(p)
-            if ea < 0: ia = -ea; sh += ia / p; ni += ia
-            elif ea > 0: ss = min(sh, ea / p); sh -= ss; ni -= min(ni, ea)
+            if ea > 0: # Deposit -> Buy benchmark
+                ia = ea; sh += ia / p; ni += ia
+            elif ea < 0: # Withdrawal -> Sell benchmark
+                ia = abs(ea); ss = min(sh, ia / p); sh -= ss; ni -= min(ni, ia)
             v = sh * p; vs.append(v); ivs.append(ni); pvs.append(v - ni)
         fv = next((v for v in vs if not math.isclose(v, 0.0, abs_tol=1e-9)), 0.0)
         rp = [((v / fv) - 1.0) * 100 if fv else 0.0 for v in vs]
