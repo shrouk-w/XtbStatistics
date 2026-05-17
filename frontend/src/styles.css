@@ -1431,3 +1431,17 @@ tbody tr:hover td { background: var(--surface-2); }
     font-size: 12px;
     color: var(--gold);
 }
+
+.warningStack {
+    margin-top: 16px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+}
+
+.warningStack p {
+    margin: 4px 0;
+    font-size: 12px;
+    color: var(--gold);
+}

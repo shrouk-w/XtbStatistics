@@ -228,36 +228,77 @@ def create_app() -> FastAPI:
                 workbook = load_workbook(io.BytesIO(payload), data_only=True)
                 
                 # Persistence for Cash Operations
-                if "Cash Operations" in workbook.sheetnames:
-                    sheet = workbook["Cash Operations"]
-                    for row in sheet.iter_rows(min_row=6, values_only=True):
-                        if not row or not row[0]: continue
-                        op = CashOperation(
-                            operation_type=str(row[0]).strip(),
-                            symbol=(row[1] or "").strip(),
-                            time=row[3] if isinstance(row[3], datetime) else None,
-                            amount=float(row[4]) if row[4] is not None else 0.0,
-                            comment=(row[6] or "").strip()
-                        )
-                        if op.time:
-                            db.add(op)
+                cash_sheet_name = next((s for s in workbook.sheetnames if "CASH OPERATION" in s.upper()), None)
+                if cash_sheet_name:
+                    sheet = workbook[cash_sheet_name]
+                    # Detect header row and column mapping
+                    header_row_idx = 0
+                    col_map = {}
+                    for i, row in enumerate(sheet.iter_rows(min_row=1, max_row=15, values_only=True)):
+                        row_vals = [str(v).strip().upper() if v else "" for v in row]
+                        if "TYPE" in row_vals and "TIME" in row_vals:
+                            header_row_idx = i + 1
+                            for target in ["ID", "TYPE", "SYMBOL", "TIME", "AMOUNT", "COMMENT"]:
+                                try: col_map[target] = row_vals.index(target)
+                                except ValueError: pass
+                            break
+                    
+                    if col_map.get("TYPE") is not None and col_map.get("TIME") is not None:
+                        for row in sheet.iter_rows(min_row=header_row_idx + 1, values_only=True):
+                            if not row or row[col_map["TYPE"]] is None: continue
+                            
+                            ext_id = row[col_map.get("ID")] if col_map.get("ID") is not None else None
+                            if ext_id is not None:
+                                try: ext_id = int(ext_id)
+                                except: ext_id = None
+
+                            op_data = dict(
+                                operation_type=str(row[col_map["TYPE"]]).strip(),
+                                symbol=(row[col_map.get("SYMBOL")] or "").strip() if col_map.get("SYMBOL") is not None else "",
+                                time=row[col_map["TIME"]] if isinstance(row[col_map["TIME"]], datetime) else None,
+                                amount=float(row[col_map["AMOUNT"]]) if col_map.get("AMOUNT") is not None and row[col_map["AMOUNT"]] is not None else 0.0,
+                                comment=(row[col_map.get("COMMENT")] or "").strip() if col_map.get("COMMENT") is not None else ""
+                            )
+                            
+                            if op_data["time"]:
+                                if ext_id is not None:
+                                    existing = db.query(CashOperation).filter(CashOperation.external_id == ext_id).first()
+                                    if existing:
+                                        for k, v in op_data.items(): setattr(existing, k, v)
+                                    else:
+                                        db.add(CashOperation(external_id=ext_id, **op_data))
+                                else:
+                                    db.add(CashOperation(**op_data))
 
                 # Persistence for Pending Orders
                 pending_sheet_name = next((s for s in workbook.sheetnames if "PENDING ORDERS" in s.upper()), None)
                 if pending_sheet_name:
                     sheet = workbook[pending_sheet_name]
-                    for row in sheet.iter_rows(min_row=9, values_only=True):
-                        if not row or row[0] is None: continue
-                        try:
-                            order = PendingOrder(
-                                order_id=row[0],
-                                symbol=row[1],
-                                margin=float(row[5]) if row[5] is not None else 0.0,
-                                open_time=row[12] if isinstance(row[12], datetime) else None
-                            )
-                            if order.order_id:
-                                db.merge(order)
-                        except: continue
+                    # Detect header row and column mapping
+                    header_row_idx = 0
+                    p_col_map = {}
+                    for i, row in enumerate(sheet.iter_rows(min_row=1, max_row=15, values_only=True)):
+                        row_vals = [str(v).strip().upper() if v else "" for v in row]
+                        if "ID" in row_vals and "SYMBOL" in row_vals:
+                            header_row_idx = i + 1
+                            for target in ["ID", "SYMBOL", "MARGIN", "OPEN TIME"]:
+                                try: p_col_map[target] = row_vals.index(target)
+                                except ValueError: pass
+                            break
+
+                    if p_col_map.get("ID") is not None:
+                        for row in sheet.iter_rows(min_row=header_row_idx + 1, values_only=True):
+                            if not row or row[p_col_map["ID"]] is None: continue
+                            try:
+                                order = PendingOrder(
+                                    order_id=row[p_col_map["ID"]],
+                                    symbol=row[p_col_map.get("SYMBOL")],
+                                    margin=float(row[p_col_map["MARGIN"]]) if p_col_map.get("MARGIN") is not None and row[p_col_map["MARGIN"]] is not None else 0.0,
+                                    open_time=row[p_col_map["OPEN TIME"]] if p_col_map.get("OPEN TIME") is not None and isinstance(row[p_col_map["OPEN TIME"]], datetime) else None
+                                )
+                                if order.order_id:
+                                    db.merge(order)
+                            except: continue
 
         if persist:
             try:
@@ -269,6 +310,13 @@ def create_app() -> FastAPI:
 
         if not cash_events and not position_events:
             raise HTTPException(status_code=400, detail="No XTB transactions found in uploaded files.")
+
+        if persist:
+            # If we persisted data, we want to return the FULL history from the database
+            # rather than just the history from the newly uploaded files.
+            full_portfolio = await get_portfolio(db)
+            full_portfolio["warnings"].extend(warnings)
+            return full_portfolio
 
         portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events, db)
         portfolio["warnings"].extend(warnings)
@@ -284,26 +332,73 @@ def create_app() -> FastAPI:
 def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
     wb = load_workbook(io.BytesIO(payload), data_only=True)
     ce = []; ece = []; tce = []; pe = []; ws = []
-    if "Cash Operations" not in wb.sheetnames: ws.append(f"{filename}: missing 'Cash Operations' sheet."); return {"cash_events": ce, "external_cash_events": ece, "trade_cash_events": tce, "position_events": pe, "warnings": ws}
-    for row in wb["Cash Operations"].iter_rows(min_row=6, values_only=True):
-        if not row or not row[0]: continue
-        ot = str(row[0]).strip(); xt = (row[1] or "").strip(); et = row[3]; am = row[4]; cm = (row[6] or "").strip()
+    
+    cash_sheet_name = next((s for s in wb.sheetnames if "CASH OPERATION" in s.upper()), None)
+    if not cash_sheet_name:
+        ws.append(f"{filename}: missing 'CASH OPERATION' sheet.")
+        return {"cash_events": ce, "external_cash_events": ece, "trade_cash_events": tce, "position_events": pe, "warnings": ws}
+    
+    sheet = wb[cash_sheet_name]
+    header_row_idx = 0
+    col_map = {}
+    for i, row in enumerate(sheet.iter_rows(min_row=1, max_row=15, values_only=True)):
+        row_vals = [str(v).strip().upper() if v else "" for v in row]
+        if "TYPE" in row_vals and "TIME" in row_vals:
+            header_row_idx = i + 1
+            for target in ["TYPE", "SYMBOL", "TIME", "AMOUNT", "COMMENT"]:
+                try: col_map[target] = row_vals.index(target)
+                except ValueError: pass
+            break
+            
+    if col_map.get("TYPE") is None or col_map.get("TIME") is None:
+        ws.append(f"{filename}: could not detect columns in '{cash_sheet_name}'.")
+        return {"cash_events": ce, "external_cash_events": ece, "trade_cash_events": tce, "position_events": pe, "warnings": ws}
+
+    for row in sheet.iter_rows(min_row=header_row_idx + 1, values_only=True):
+        if not row or row[col_map["TYPE"]] is None: continue
+        
+        ot = str(row[col_map["TYPE"]]).strip()
+        xt = (row[col_map.get("SYMBOL")] or "").strip() if col_map.get("SYMBOL") is not None else ""
+        et = row[col_map["TIME"]]
+        am = row[col_map["AMOUNT"]] if col_map.get("AMOUNT") is not None else None
+        cm = (row[col_map.get("COMMENT")] or "").strip() if col_map.get("COMMENT") is not None else ""
+        
         if not isinstance(et, datetime) or am is None: continue
         ed = et.date(); cam = float(am); ce.append(CashEvent(event_date=ed, amount=cam, operation_type=ot))
-        if ot in {"Stock purchase", "Stock sale", "Stock sell"}: tce.append((ed, cam))
-        elif is_external_cash_operation(ot): ece.append((ed, cam))
-        if ot in {"Stock purchase", "Stock sale", "Stock sell"}:
+        
+        if ot.lower() in {"stock purchase", "stock sale", "stock sell"}:
+            tce.append((ed, cam))
             qty = extract_quantity(cm)
-            if qty is None: ws.append(f"{filename}: could not parse quantity from '{cm}'."); continue
-            pe.append(PositionEvent(ticker=xt, yahoo_ticker=to_yahoo_symbol(xt), quantity_delta=qty if ot == "Stock purchase" else -qty, trade_date=ed))
+            if qty is None:
+                ws.append(f"{filename}: could not parse quantity from '{cm}'.")
+                continue
+            pe.append(PositionEvent(ticker=xt, yahoo_ticker=to_yahoo_symbol(xt), quantity_delta=qty if ot.lower() == "stock purchase" else -qty, trade_date=ed))
+        elif is_external_cash_operation(ot):
+            ece.append((ed, cam))
+
     psn = next((s for s in wb.sheetnames if "PENDING ORDERS" in s.upper()), None)
     if psn:
-        for row in wb[psn].iter_rows(min_row=9, values_only=True):
-            if not row or row[0] is None: continue
-            try:
-                m = float(row[5]) if row[5] is not None else 0.0; ot = row[12]
-                if m > 0 and isinstance(ot, datetime): ce.append(CashEvent(event_date=ot.date(), amount=-m, operation_type="Pending Order Margin"))
-            except: continue
+        p_sheet = wb[psn]
+        p_header_row_idx = 0
+        p_col_map = {}
+        for i, row in enumerate(p_sheet.iter_rows(min_row=1, max_row=15, values_only=True)):
+            row_vals = [str(v).strip().upper() if v else "" for v in row]
+            if "MARGIN" in row_vals and "OPEN TIME" in row_vals:
+                p_header_row_idx = i + 1
+                for target in ["MARGIN", "OPEN TIME"]:
+                    try: p_col_map[target] = row_vals.index(target)
+                    except ValueError: pass
+                break
+        
+        if p_col_map.get("MARGIN") is not None and p_col_map.get("OPEN TIME") is not None:
+            for row in p_sheet.iter_rows(min_row=p_header_row_idx + 1, values_only=True):
+                if not row or row[p_col_map["MARGIN"]] is None: continue
+                try:
+                    m = float(row[p_col_map["MARGIN"]]); ot = row[p_col_map["OPEN TIME"]]
+                    if m > 0 and isinstance(ot, datetime):
+                        ce.append(CashEvent(event_date=ot.date(), amount=-m, operation_type="Pending Order Margin"))
+                except: continue
+                
     return {"cash_events": ce, "external_cash_events": ece, "trade_cash_events": tce, "position_events": pe, "warnings": ws}
 
 def is_external_cash_operation(ot: str) -> bool:
@@ -339,7 +434,7 @@ def build_portfolio_history(ce, ece, tce, pe, db) -> dict[str, Any]:
     tv = cs.add(hv, fill_value=0.0); pv = tv.subtract(ecs, fill_value=0.0)
     rdf = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"), "cash": cs.round(2), "holdingsValue": hv.round(2), "totalValue": tv.round(2), "externalCashFlow": ecs.round(2), "profitValue": pv.round(2)})
     sm = {"startDate": rdf.iloc[0]["date"], "endDate": rdf.iloc[-1]["date"], "currentCash": round(float(cs.iloc[-1]), 2), "currentHoldingsValue": round(float(hv.iloc[-1]), 2), "currentTotalValue": round(float(tv.iloc[-1]), 2), "currentProfitValue": round(float(pv.iloc[-1]), 2), "netExternalCashFlow": round(float(ecs.iloc[-1]), 2), "currentProfitPercent": round((float(pv.iloc[-1]) / float(ecs.iloc[-1])) * 100, 2) if not math.isclose(float(ecs.iloc[-1]), 0.0, abs_tol=1e-9) else 0.0, "peakValue": round(float(tv.max()), 2), "lowestValue": round(float(tv.min()), 2)}
-    bs, bws = build_benchmark_series(sd, ed, idx, tce, db)
+    bs, bws = build_benchmark_series(sd, ed, idx, ece, db)
     ws.extend(bws); return {"summary": sm, "series": rdf.to_dict(orient="records"), "holdings": ch, "benchmarks": bs, "warnings": ws}
 
 def build_quantities_frame(pe, idx) -> pd.DataFrame:
@@ -383,15 +478,18 @@ def fetch_stooq_price(s) -> float | None:
 def fetch_stooq_history(s) -> pd.Series:
     ak = os.getenv("STOOQ_API_KEY")
     if not ak: return pd.Series(dtype=float)
-    u = f"https://stooq.pl/q/d/l/?s={s.lower()}&i=d&apikey={ak}"
+    ss = YAHOO_TO_STOOQ_MAP.get(s, s.replace(".WA", "").replace(".PL", ""))
+    u = f"https://stooq.pl/q/d/l/?s={ss.lower()}&i=d&apikey={ak}"
     try:
         r = httpx.get(u, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15.0)
         if r.status_code == 200:
             if "Uzyskaj apikey" in r.text: return pd.Series(dtype=float)
             df = pd.read_csv(io.StringIO(r.text))
-            if 'Data' in df.columns and 'Zamkniecie' in df.columns:
-                df['Data'] = pd.to_datetime(df['Data']); df = df.set_index('Data')
-                return df['Zamkniecie'].astype(float).sort_index()
+            date_col = 'Data' if 'Data' in df.columns else 'Date'
+            close_col = 'Zamkniecie' if 'Zamkniecie' in df.columns else 'Close'
+            if date_col in df.columns and close_col in df.columns:
+                df[date_col] = pd.to_datetime(df[date_col]); df = df.set_index(date_col)
+                return df[close_col].astype(float).sort_index()
     except: pass
     return pd.Series(dtype=float)
 
@@ -420,12 +518,17 @@ def build_price_frame(qdf, sd, ed, db) -> tuple[pd.DataFrame, pd.DataFrame, dict
     
     if STOOQ_KEY_ERROR:
         ws.append(STOOQ_KEY_ERROR)
-    yts = qdf.columns.tolist(); uts = sorted(list(set(t for t in yts if t))); lq = qdf.iloc[-1]; ats = [t for t in uts if lq[t] > 1e-6]; bts = [b["symbol"] for b in BENCHMARKS.values()]; atf = list(set(ats) | set(bts))
+    
+    uts = sorted(list(set(qdf.columns.tolist()) | {b["symbol"] for b in BENCHMARKS.values()}))
     for t in uts: cm[t] = resolve_currency(t)
+    
     data = pd.DataFrame()
-    if atf:
-        try: data = yf.download(atf, start=sd.isoformat(), end=(ed + timedelta(days=1)).isoformat(), auto_adjust=False, progress=False, group_by="column", threads=True)
-        except: pass
+    try:
+        print(f"DEBUG: Attempting Yahoo bulk download for {len(uts)} symbols...")
+        data = yf.download(uts, start=sd.isoformat(), end=(ed + timedelta(days=1)).isoformat(), auto_adjust=False, progress=False, group_by="column", threads=True)
+    except:
+        print("DEBUG: Yahoo bulk download FAILED.")
+    
     ucs = set(cm.values()) - {"PLN"}; frs = {}
     for c in ucs:
         r = get_investing_fx(c)
@@ -437,47 +540,75 @@ def build_price_frame(qdf, sd, ed, db) -> tuple[pd.DataFrame, pd.DataFrame, dict
             lp = db.query(LatestPrice).filter(LatestPrice.symbol == c).first()
             if lp: frs[c] = lp.price
             else: frs[c] = {"USD": 4.0, "EUR": 4.3, "GBP": 5.0}.get(c, 1.0); ws.append(f"FX Fallback for {c}")
+
+    bts = [b["symbol"] for b in BENCHMARKS.values()]
     for bt in bts:
         h = pd.Series(dtype=float)
         if not data.empty:
             try:
-                if len(atf) > 1:
+                if len(uts) > 1:
                     if "Close" in data.columns: h = data["Close"][bt]
                     elif ("Close", bt) in data.columns: h = data[("Close", bt)]
                 else:
                     if "Close" in data.columns: h = data["Close"]
             except: pass
-        if h.empty or bt == "WIG20.WA":
-            sp = fetch_stooq_price(bt)
-            if sp: h = pd.Series(sp, index=idx)
+        
+        if h.empty or h.isnull().all() or bt == "WIG20.WA":
+            print(f"DEBUG: Yahoo failed for benchmark {bt}. Trying Stooq history...")
+            sh = fetch_stooq_history(bt)
+            if not sh.empty:
+                print(f"DEBUG: Stooq history SUCCESS for {bt} ({len(sh)} points)")
+                h = sh
+            else:
+                print(f"DEBUG: Stooq history FAILED for {bt}. Trying single price...")
+                sp = fetch_stooq_price(bt)
+                if sp:
+                    print(f"DEBUG: Stooq single price SUCCESS for {bt}: {sp}")
+                    h = pd.Series(sp, index=idx)
+        
         if not h.empty and not h.isnull().all():
             cv = float(h.iloc[-1])
             if cv > 0:
                 lp = db.query(LatestPrice).filter(LatestPrice.symbol == bt).first()
                 if not lp: lp = LatestPrice(symbol=bt); db.add(lp)
                 lp.price = cv; lp.currency = "INDEX" if bt.startswith("^") or "WIG" in bt else "USD"; lp.last_updated = datetime.utcnow()
+
     xrm = {}
     for o in db.query(OpenPosition).all(): xrm[to_yahoo_symbol(o.symbol)] = o.symbol
     for c in db.query(ClosedPosition).all(): xrm[to_yahoo_symbol(c.symbol)] = c.symbol
+    
     for t in uts:
+        if t in bts: continue
         h = pd.Series(dtype=float)
-        if not data.empty and t in ats:
+        if not data.empty:
             try:
-                if len(atf) > 1:
+                if len(uts) > 1:
                     if "Close" in data.columns: h = data["Close"][t]
                     elif ("Close", t) in data.columns: h = data[("Close", t)]
                 else:
                     if "Close" in data.columns: h = data["Close"]
             except: pass
-        if (h.empty or h.isnull().all()) and t in ats:
-            sp = fetch_stooq_price(t)
-            if sp: h = pd.Series(sp, index=idx)
+        
+        if h.empty or h.isnull().all():
+            print(f"DEBUG: Yahoo failed for ticker {t}. Trying Stooq history...")
+            sh = fetch_stooq_history(t)
+            if not sh.empty:
+                print(f"DEBUG: Stooq history SUCCESS for {t} ({len(sh)} points)")
+                h = sh
+            else:
+                print(f"DEBUG: Stooq history FAILED for {t}. Trying single price...")
+                sp = fetch_stooq_price(t)
+                if sp:
+                    print(f"DEBUG: Stooq single price SUCCESS for {t}: {sp}")
+                    h = pd.Series(sp, index=idx)
+        
         if not h.empty and not h.isnull().all():
             cv = float(h.iloc[-1])
             if cv > 0:
                 lp = db.query(LatestPrice).filter(LatestPrice.symbol == t).first()
                 if not lp: lp = LatestPrice(symbol=t); db.add(lp)
                 lp.price = cv; lp.currency = cm.get(t); lp.last_updated = datetime.utcnow()
+        
         if h.empty or h.isnull().all():
             lp = db.query(LatestPrice).filter(LatestPrice.symbol == t).first()
             if lp and lp.price: h = pd.Series(lp.price, index=idx)
@@ -487,9 +618,11 @@ def build_price_frame(qdf, sd, ed, db) -> tuple[pd.DataFrame, pd.DataFrame, dict
                 if mp > 0: h = pd.Series(mp, index=idx)
                 elif cp > 0: h = pd.Series(cp, index=idx)
                 else: h = pd.Series(0.0, index=idx)
+        
         h = h.reindex(idx).ffill().bfill().fillna(0.0); ops[t] = h.round(6); c = cm[t]
         if c != "PLN": ps[t] = (h * frs.get(c, 1.0)).round(6)
         else: ps[t] = h.round(6)
+    
     try: db.commit()
     except: db.rollback()
     return ps.fillna(0.0), ops.fillna(0.0), cm, ws
@@ -535,19 +668,32 @@ def build_benchmark_series(sd, ed, idx, tce, db) -> tuple[dict[str, Any], list[s
     for d, a in tce: tcb[d] = tcb.get(d, 0.0) + float(a)
     for k, cfg in BENCHMARKS.items():
         s = cfg["symbol"]; h = pd.Series(dtype=float)
-        if k == "wig20": h = fetch_stooq_history("wig20")
-        if h.empty: h = download_close_series(s, sd, ed)
+        print(f"DEBUG: Building benchmark {k} ({s})...")
+        h = fetch_stooq_history(s)
         if h.empty:
+            print(f"DEBUG: Stooq history empty for benchmark {s}. Trying Yahoo...")
+            h = download_close_series(s, sd, ed)
+        else:
+            print(f"DEBUG: Stooq history SUCCESS for benchmark {s} ({len(h)} points)")
+            
+        if h.empty:
+            print(f"DEBUG: Yahoo failed for benchmark {s}. Trying LatestPrice...")
             lp = db.query(LatestPrice).filter(LatestPrice.symbol == s).first()
             if lp and lp.price: h = pd.Series(lp.price, index=idx)
             else: ws.append(f"No benchmark history for {cfg['label']}"); continue
-        h = h.reindex(idx).ffill().bfill(); fp = float(h[h > 0].iloc[0]) if not h[h > 0].empty else 0.0
+        
+        h = h.reindex(idx).ffill().bfill()
+        print(f"DEBUG: Final benchmark series for {s} has {len(h)} points and last value {h.iloc[-1] if not h.empty else 'N/A'}")
+        
+        fp = float(h[h > 0].iloc[0]) if not h[h > 0].empty else 0.0
         if math.isclose(fp, 0.0, abs_tol=1e-12): ws.append(f"Benchmark {cfg['label']} has no usable starting price."); continue
         sh = 0.0; ni = 0.0; vs = []; ivs = []; pvs = []
         for ts, p in h.items():
             ea = tcb.get(ts.date(), 0.0); p = float(p)
-            if ea < 0: ia = -ea; sh += ia / p; ni += ia
-            elif ea > 0: ss = min(sh, ea / p); sh -= ss; ni -= min(ni, ea)
+            if ea > 0: # Deposit -> Buy benchmark
+                ia = ea; sh += ia / p; ni += ia
+            elif ea < 0: # Withdrawal -> Sell benchmark
+                ia = abs(ea); ss = min(sh, ia / p); sh -= ss; ni -= min(ni, ia)
             v = sh * p; vs.append(v); ivs.append(ni); pvs.append(v - ni)
         fv = next((v for v in vs if not math.isclose(v, 0.0, abs_tol=1e-9)), 0.0)
         rp = [((v / fv) - 1.0) * 100 if fv else 0.0 for v in vs]

@@ -1,20 +1,32 @@
+import { useRef } from "react";
+
 export function ResyncBox({ files, setFiles, loading, onSubmit }) {
+  const fileInputRef = useRef(null);
+
+  const handleFileChange = (e) => {
+    const selectedFiles = Array.from(e.target.files ?? []);
+    if (selectedFiles.length > 0) {
+      setFiles(selectedFiles);
+    }
+  };
+
   return (
     <div className="resyncBox">
       <button
         type="button"
         className="resyncSelectBtn"
-        onClick={() => document.getElementById("resyncFileInput").click()}
+        onClick={() => fileInputRef.current?.click()}
       >
         {files.length ? `${files.length} file${files.length > 1 ? "s" : ""}` : "Choose XLSX"}
       </button>
       <input
+        ref={fileInputRef}
         id="resyncFileInput"
         type="file"
         accept=".xlsx"
         multiple
         style={{ display: "none" }}
-        onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+        onChange={handleFileChange}
       />
       <button
         type="button"
@@ -22,7 +34,7 @@ export function ResyncBox({ files, setFiles, loading, onSubmit }) {
         onClick={(e) => onSubmit(e, true)}
         disabled={loading || !files.length}
       >
-        Re-sync
+        {loading ? "Syncing..." : "Re-sync"}
       </button>
     </div>
   );
