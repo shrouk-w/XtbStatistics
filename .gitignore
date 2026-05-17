@@ -5,3 +5,5 @@ frontend/dist/
 .idea/
 .venv/
 .venv-wsl/
+.env
+cache/

@@ -23,7 +23,7 @@ from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
 from .database import get_db, init_db
-from .models import CashOperation, ClosedPosition, OpenPosition, PendingOrder
+from .models import CashOperation, ClosedPosition, OpenPosition, PendingOrder, LatestPrice
 
 COMMENT_RE = re.compile(
     r"(?:OPEN|CLOSE) BUY (?P<quantity>\d+(?:\.\d+)?)(?:/(?P<total>\d+(?:\.\d+)?))? @ (?P<price>\d+(?:\.\d+)?)"
@@ -56,16 +56,23 @@ FX_SYMBOLS = {
 }
 PROXY_ENV_NAMES = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
 BENCHMARKS = {
+    "wig20": {"symbol": "WIG20.WA", "label": "WIG20"},
     "sp500": {"symbol": "^GSPC", "label": "S&P 500"},
     "nasdaq": {"symbol": "^IXIC", "label": "Nasdaq Composite"},
     "gold": {"symbol": "GC=F", "label": "Gold futures"},
     "bitcoin": {"symbol": "BTC-USD", "label": "Bitcoin"},
 }
 
-# Windows can resolve .js as text/plain from registry, which breaks ES modules in browsers.
+YAHOO_TO_STOOQ_MAP = {
+    "CDR.WA": "CDR", "XTB.WA": "XTB", "PZU.WA": "PZU", "PXM.WA": "PXM", "TPE.WA": "TPE",
+    "KGN.WA": "KGN", "INL.WA": "INL", "DIG.WA": "DIG", "ETL.WA": "ETL", "PAS.WA": "PAS",
+    "11B.WA": "11B", "ACP.WA": "ACP", "ALE.WA": "ALE", "LPP.WA": "LPP", "PKN.WA": "PKN",
+    "PKO.WA": "PKO", "PEO.WA": "PEO", "KGH.WA": "KGH", "DNP.WA": "DNP", "JSW.WA": "JSW",
+    "^GSPC": "^SPX", "^IXIC": "^NDX", "BTC-USD": "BTCUSD", "GC=F": "XAUUSD",
+}
+
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("application/javascript", ".mjs")
-
 
 @dataclass
 class PositionEvent:
@@ -74,13 +81,11 @@ class PositionEvent:
     quantity_delta: float
     trade_date: date
 
-
 @dataclass
 class CashEvent:
     event_date: date
     amount: float
     operation_type: str
-
 
 from pydantic import BaseModel
 
@@ -185,7 +190,7 @@ def create_app() -> FastAPI:
             _portfolio_cache["expires_at"] = now + _PORTFOLIO_CACHE_TTL
             return empty
 
-        portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events)
+        portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events, db)
         _portfolio_cache["value"] = portfolio
         _portfolio_cache["expires_at"] = now + _PORTFOLIO_CACHE_TTL
         return portfolio
@@ -205,9 +210,6 @@ def create_app() -> FastAPI:
         position_events: list[PositionEvent] = []
         warnings: list[str] = []
 
-        all_db_ops: list[CashOperation] = []
-        all_db_pending: list[PendingOrder] = []
-
         for upload in files:
             filename = upload.filename or "uploaded.xlsx"
             if not filename.lower().endswith(".xlsx"):
@@ -223,9 +225,6 @@ def create_app() -> FastAPI:
             warnings.extend(parsed["warnings"])
 
             if persist:
-                # Basic persistence implementation
-                # Note: Full persistence (Positions, etc.) would need more detailed parsing
-                # but we'll focus on the core events for now.
                 workbook = load_workbook(io.BytesIO(payload), data_only=True)
                 
                 # Persistence for Cash Operations
@@ -241,12 +240,6 @@ def create_app() -> FastAPI:
                             comment=(row[6] or "").strip()
                         )
                         if op.time:
-                            # Use a simple way to avoid full duplicates if external_id was available
-                            # Since standard XTB Excel doesn't always have a clear unique ID in all versions
-                            # we merge based on time, type and amount as a heuristic if no ID.
-                            # But looking at models, we have external_id.
-                            # In parse_xtb_workbook we don't have ID, but the script import_excel.py does.
-                            # We'll stick to merging into DB.
                             db.add(op)
 
                 # Persistence for Pending Orders
@@ -277,623 +270,301 @@ def create_app() -> FastAPI:
         if not cash_events and not position_events:
             raise HTTPException(status_code=400, detail="No XTB transactions found in uploaded files.")
 
-        portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events)
+        portfolio = build_portfolio_history(cash_events, external_cash_events, trade_cash_events, position_events, db)
         portfolio["warnings"].extend(warnings)
         return portfolio
 
     frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
     if frontend_dist.exists():
         app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
-
         @app.get("/")
-        def index() -> FileResponse:
-            return FileResponse(frontend_dist / "index.html")
-
+        def index(): return FileResponse(frontend_dist / "index.html")
     return app
 
-
 def parse_xtb_workbook(payload: bytes, filename: str) -> dict[str, Any]:
-    workbook = load_workbook(io.BytesIO(payload), data_only=True)
-    cash_events: list[CashEvent] = []
-    external_cash_events: list[tuple[date, float]] = []
-    trade_cash_events: list[tuple[date, float]] = []
-    position_events: list[PositionEvent] = []
-    warnings: list[str] = []
-
-    if "Cash Operations" not in workbook.sheetnames:
-        warnings.append(f"{filename}: missing 'Cash Operations' sheet.")
-        return {
-            "cash_events": cash_events,
-            "external_cash_events": external_cash_events,
-            "trade_cash_events": trade_cash_events,
-            "position_events": position_events,
-            "warnings": warnings,
-        }
-
-    sheet = workbook["Cash Operations"]
-    for row in sheet.iter_rows(min_row=6, values_only=True):
-        if not row or not row[0]:
-            continue
-
-        operation_type = str(row[0]).strip()
-        xtb_ticker = (row[1] or "").strip()
-        event_time = row[3]
-        amount = row[4]
-        comment = (row[6] or "").strip()
-
-        if not isinstance(event_time, datetime) or amount is None:
-            continue
-
-        event_date = event_time.date()
-        cash_amount = float(amount)
-        cash_events.append(CashEvent(event_date=event_date, amount=cash_amount, operation_type=operation_type))
-
-        if operation_type in {"Stock purchase", "Stock sale", "Stock sell"}:
-            trade_cash_events.append((event_date, cash_amount))
-        elif is_external_cash_operation(operation_type):
-            external_cash_events.append((event_date, cash_amount))
-
-        if operation_type == "Stock purchase":
-            quantity = extract_quantity(comment)
-            if quantity is None:
-                warnings.append(f"{filename}: could not parse quantity from comment '{comment}'.")
-                continue
-            position_events.append(
-                PositionEvent(
-                    ticker=xtb_ticker,
-                    yahoo_ticker=to_yahoo_symbol(xtb_ticker),
-                    quantity_delta=quantity,
-                    trade_date=event_date,
-                )
-            )
-        elif operation_type in {"Stock sale", "Stock sell"}:
-            quantity = extract_quantity(comment)
-            if quantity is None:
-                warnings.append(f"{filename}: could not parse quantity from comment '{comment}'.")
-                continue
-            position_events.append(
-                PositionEvent(
-                    ticker=xtb_ticker,
-                    yahoo_ticker=to_yahoo_symbol(xtb_ticker),
-                    quantity_delta=-quantity,
-                    trade_date=event_date,
-                )
-            )
-
-    # Process Pending Orders if sheet exists
-    pending_sheet_name = next((s for s in workbook.sheetnames if "PENDING ORDERS" in s.upper()), None)
-    if pending_sheet_name:
-        sheet = workbook[pending_sheet_name]
-        # XTB Excel structure for Pending Orders usually has headers at row 8, data starts at row 9
-        for row in sheet.iter_rows(min_row=9, values_only=True):
-            if not row or row[0] is None:
-                continue
-            
+    wb = load_workbook(io.BytesIO(payload), data_only=True)
+    ce = []; ece = []; tce = []; pe = []; ws = []
+    if "Cash Operations" not in wb.sheetnames: ws.append(f"{filename}: missing 'Cash Operations' sheet."); return {"cash_events": ce, "external_cash_events": ece, "trade_cash_events": tce, "position_events": pe, "warnings": ws}
+    for row in wb["Cash Operations"].iter_rows(min_row=6, values_only=True):
+        if not row or not row[0]: continue
+        ot = str(row[0]).strip(); xt = (row[1] or "").strip(); et = row[3]; am = row[4]; cm = (row[6] or "").strip()
+        if not isinstance(et, datetime) or am is None: continue
+        ed = et.date(); cam = float(am); ce.append(CashEvent(event_date=ed, amount=cam, operation_type=ot))
+        if ot in {"Stock purchase", "Stock sale", "Stock sell"}: tce.append((ed, cam))
+        elif is_external_cash_operation(ot): ece.append((ed, cam))
+        if ot in {"Stock purchase", "Stock sale", "Stock sell"}:
+            qty = extract_quantity(cm)
+            if qty is None: ws.append(f"{filename}: could not parse quantity from '{cm}'."); continue
+            pe.append(PositionEvent(ticker=xt, yahoo_ticker=to_yahoo_symbol(xt), quantity_delta=qty if ot == "Stock purchase" else -qty, trade_date=ed))
+    psn = next((s for s in wb.sheetnames if "PENDING ORDERS" in s.upper()), None)
+    if psn:
+        for row in wb[psn].iter_rows(min_row=9, values_only=True):
+            if not row or row[0] is None: continue
             try:
-                # Margin is typically at column F (index 5)
-                # Open time is typically at column M (index 12)
-                margin = float(row[5]) if row[5] is not None else 0.0
-                open_time = row[12]
-                if margin > 0 and isinstance(open_time, datetime):
-                    cash_events.append(CashEvent(
-                        event_date=open_time.date(),
-                        amount=-margin,
-                        operation_type="Pending Order Margin"
-                    ))
-            except (ValueError, TypeError, IndexError):
-                continue
+                m = float(row[5]) if row[5] is not None else 0.0; ot = row[12]
+                if m > 0 and isinstance(ot, datetime): ce.append(CashEvent(event_date=ot.date(), amount=-m, operation_type="Pending Order Margin"))
+            except: continue
+    return {"cash_events": ce, "external_cash_events": ece, "trade_cash_events": tce, "position_events": pe, "warnings": ws}
 
-    return {
-        "cash_events": cash_events,
-        "external_cash_events": external_cash_events,
-        "trade_cash_events": trade_cash_events,
-        "position_events": position_events,
-        "warnings": warnings,
-    }
+def is_external_cash_operation(ot: str) -> bool:
+    n = ot.lower()
+    if any(t in n for t in ["stock purchase", "stock sale", "stock sell", "trade"]): return False
+    if any(e in n for e in ["divident", "interest"]): return False
+    return any(k in n for k in ["deposit", "withdrawal", "transfer", "wplata", "wyplata"])
 
+def to_yahoo_symbol(xt: str) -> str:
+    for s, r in YAHOO_SUFFIX_MAP.items():
+        if xt.endswith(s): return xt[: -len(s)] + r
+    return xt
 
-def is_external_cash_operation(operation_type: str) -> bool:
-    normalized = operation_type.lower()
-    # "Deposit" or "Withdrawal" or "Transfer" usually means external.
-    # Exclude "Stock purchase" and "Stock sale" which are trades.
-    # Exclude "DIVIDENT" and "Interest" which are internal earnings.
-    if any(trade in normalized for trade in ["stock purchase", "stock sale", "stock sell", "trade"]):
-        return False
-    if any(earning in normalized for earning in ["divident", "interest"]):
-        return False
-    return any(keyword in normalized for keyword in ["deposit", "withdrawal", "transfer", "wplata", "wyplata"])
+def extract_quantity(cm: str) -> float | None:
+    m = COMMENT_RE.search(cm)
+    return float(m.group("quantity")) if m else None
 
+def build_portfolio_history(ce, ece, tce, pe, db) -> dict[str, Any]:
+    ad = [e.event_date for e in ce] + [e.trade_date for e in pe]
+    if not ad: return {"summary": {}, "series": [], "holdings": [], "benchmarks": {}, "warnings": ["No dates found."]}
+    sd = min(ad); ed = date.today(); idx = pd.date_range(start=sd, end=ed, freq="D")
+    cs = pd.Series(0.0, index=idx)
+    for e in ce: cs.loc[pd.Timestamp(e.event_date)] += float(e.amount)
+    cs = cs.cumsum()
+    ecs = pd.Series(0.0, index=idx)
+    for d, a in ece: ecs.loc[pd.Timestamp(d)] += float(a)
+    ecs = ecs.cumsum()
+    if pe:
+        qdf = build_quantities_frame(pe, idx)
+        pdf, opdf, fcm, ws = build_price_frame(qdf, sd, ed, db)
+        mv = qdf * pdf; hv = mv.sum(axis=1); ch = summarize_current_holdings(qdf, pdf, opdf, fcm)
+    else: qdf = pd.DataFrame(index=idx); pdf = pd.DataFrame(index=idx); opdf = pd.DataFrame(index=idx); ws = []; hv = pd.Series(0.0, index=idx); ch = []
+    tv = cs.add(hv, fill_value=0.0); pv = tv.subtract(ecs, fill_value=0.0)
+    rdf = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"), "cash": cs.round(2), "holdingsValue": hv.round(2), "totalValue": tv.round(2), "externalCashFlow": ecs.round(2), "profitValue": pv.round(2)})
+    sm = {"startDate": rdf.iloc[0]["date"], "endDate": rdf.iloc[-1]["date"], "currentCash": round(float(cs.iloc[-1]), 2), "currentHoldingsValue": round(float(hv.iloc[-1]), 2), "currentTotalValue": round(float(tv.iloc[-1]), 2), "currentProfitValue": round(float(pv.iloc[-1]), 2), "netExternalCashFlow": round(float(ecs.iloc[-1]), 2), "currentProfitPercent": round((float(pv.iloc[-1]) / float(ecs.iloc[-1])) * 100, 2) if not math.isclose(float(ecs.iloc[-1]), 0.0, abs_tol=1e-9) else 0.0, "peakValue": round(float(tv.max()), 2), "lowestValue": round(float(tv.min()), 2)}
+    bs, bws = build_benchmark_series(sd, ed, idx, tce, db)
+    ws.extend(bws); return {"summary": sm, "series": rdf.to_dict(orient="records"), "holdings": ch, "benchmarks": bs, "warnings": ws}
 
-def to_yahoo_symbol(xtb_ticker: str) -> str:
-    for suffix, replacement in YAHOO_SUFFIX_MAP.items():
-        if xtb_ticker.endswith(suffix):
-            return xtb_ticker[: -len(suffix)] + replacement
-    return xtb_ticker
+def build_quantities_frame(pe, idx) -> pd.DataFrame:
+    ts = sorted({e.yahoo_ticker for e in pe}); qs = pd.DataFrame(0.0, index=idx, columns=ts)
+    for e in pe: qs.loc[pd.Timestamp(e.trade_date), e.yahoo_ticker] += e.quantity_delta
+    return qs.cumsum()
 
+from dotenv import load_dotenv
+load_dotenv()
 
-def extract_quantity(comment: str) -> float | None:
-    match = COMMENT_RE.search(comment)
-    if not match:
-        return None
-    return float(match.group("quantity"))
+def get_yf_session(): return None
+def get_investing_fx(c) -> float | None:
+    if c == "PLN": return 1.0
+    pm = {"USD": "usd-pln", "EUR": "eur-pln", "GBP": "gbp-pln", "CHF": "chf-pln"}; p = pm.get(c.upper())
+    if not p: return None
+    u = f"https://www.investing.com/currencies/{p}"; h = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        r = httpx.get(u, headers=h, timeout=10.0)
+        if r.status_code == 200:
+            m = re.search(r'\"ask\":\s*\"([\d\.,]+)\"', r.text)
+            if m: return float(m.group(1).replace(',', ''))
+            m = re.search(r'instrument-price-last\">([\d\.,]+)', r.text)
+            if m: return float(m.group(1).replace(',', ''))
+    except: pass
+    return None
 
+def fetch_stooq_price(s) -> float | None:
+    ak = os.getenv("STOOQ_API_KEY")
+    if not ak: return None
+    ss = YAHOO_TO_STOOQ_MAP.get(s, s.replace(".WA", "").replace(".PL", ""))
+    u = f"https://stooq.pl/q/d/l/?s={ss.lower()}&i=d&apikey={ak}"
+    try:
+        r = httpx.get(u, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10.0)
+        if r.status_code == 200:
+            if "Uzyskaj apikey" in r.text: return None
+            df = pd.read_csv(io.StringIO(r.text))
+            if not df.empty and 'Zamkniecie' in df.columns: return float(df['Zamkniecie'].iloc[-1])
+    except: pass
+    return None
 
-def build_portfolio_history(
-    cash_events: list[CashEvent],
-    external_cash_events: list[tuple[date, float]],
-    trade_cash_events: list[tuple[date, float]],
-    position_events: list[PositionEvent],
-) -> dict[str, Any]:
-    all_dates = [event.event_date for event in cash_events] + [event.trade_date for event in position_events]
-    start_date = min(all_dates)
-    end_date = date.today()
-    index = pd.date_range(start=start_date, end=end_date, freq="D")
+def fetch_stooq_history(s) -> pd.Series:
+    ak = os.getenv("STOOQ_API_KEY")
+    if not ak: return pd.Series(dtype=float)
+    u = f"https://stooq.pl/q/d/l/?s={s.lower()}&i=d&apikey={ak}"
+    try:
+        r = httpx.get(u, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15.0)
+        if r.status_code == 200:
+            if "Uzyskaj apikey" in r.text: return pd.Series(dtype=float)
+            df = pd.read_csv(io.StringIO(r.text))
+            if 'Data' in df.columns and 'Zamkniecie' in df.columns:
+                df['Data'] = pd.to_datetime(df['Data']); df = df.set_index('Data')
+                return df['Zamkniecie'].astype(float).sort_index()
+    except: pass
+    return pd.Series(dtype=float)
 
-    cash_series = pd.Series(0.0, index=index)
-    for event in cash_events:
-        cash_series.loc[pd.Timestamp(event.event_date)] += float(event.amount)
-    cash_series = cash_series.cumsum()
+# Global to store API key validity for the current session
+STOOQ_KEY_CHECKED = False
+STOOQ_KEY_ERROR = None
 
-    external_cash_series = pd.Series(0.0, index=index)
-    for event_date, amount in external_cash_events:
-        external_cash_series.loc[pd.Timestamp(event_date)] += float(amount)
-    external_cash_series = external_cash_series.cumsum()
+def build_price_frame(qdf, sd, ed, db) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], list[str]]:
+    idx = pd.date_range(start=sd, end=ed, freq="D"); ps = pd.DataFrame(index=idx); ops = pd.DataFrame(index=idx); cm = {}; ws = []
+    ak = os.getenv("STOOQ_API_KEY")
+    
+    global STOOQ_KEY_CHECKED, STOOQ_KEY_ERROR
+    
+    if not ak: 
+        ws.append("STOOQ_API_ERROR: Klucz API Stooq nie został skonfigurowany.")
+    elif not STOOQ_KEY_CHECKED:
+        STOOQ_KEY_CHECKED = True
+        try:
+            tr = httpx.get(f"https://stooq.pl/q/d/l/?s=wig20&i=d&apikey={ak}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=7.0)
+            if tr.status_code == 200 and "Uzyskaj apikey" in tr.text:
+                STOOQ_KEY_ERROR = "STOOQ_API_ERROR: Twój klucz API Stooq wygasł lub jest nieprawidłowy. Sprawdź README.md, aby dowiedzieć się jak go zdobyć i odśwież aplikację."
+            else:
+                STOOQ_KEY_ERROR = None
+        except:
+            STOOQ_KEY_CHECKED = False # Retry next time if network failed
+    
+    if STOOQ_KEY_ERROR:
+        ws.append(STOOQ_KEY_ERROR)
+    yts = qdf.columns.tolist(); uts = sorted(list(set(t for t in yts if t))); lq = qdf.iloc[-1]; ats = [t for t in uts if lq[t] > 1e-6]; bts = [b["symbol"] for b in BENCHMARKS.values()]; atf = list(set(ats) | set(bts))
+    for t in uts: cm[t] = resolve_currency(t)
+    data = pd.DataFrame()
+    if atf:
+        try: data = yf.download(atf, start=sd.isoformat(), end=(ed + timedelta(days=1)).isoformat(), auto_adjust=False, progress=False, group_by="column", threads=True)
+        except: pass
+    ucs = set(cm.values()) - {"PLN"}; frs = {}
+    for c in ucs:
+        r = get_investing_fx(c)
+        if r:
+            frs[c] = r; lp = db.query(LatestPrice).filter(LatestPrice.symbol == c).first()
+            if not lp: lp = LatestPrice(symbol=c); db.add(lp)
+            lp.price = r; lp.currency = "PLN"; lp.last_updated = datetime.utcnow()
+        else:
+            lp = db.query(LatestPrice).filter(LatestPrice.symbol == c).first()
+            if lp: frs[c] = lp.price
+            else: frs[c] = {"USD": 4.0, "EUR": 4.3, "GBP": 5.0}.get(c, 1.0); ws.append(f"FX Fallback for {c}")
+    for bt in bts:
+        h = pd.Series(dtype=float)
+        if not data.empty:
+            try:
+                if len(atf) > 1:
+                    if "Close" in data.columns: h = data["Close"][bt]
+                    elif ("Close", bt) in data.columns: h = data[("Close", bt)]
+                else:
+                    if "Close" in data.columns: h = data["Close"]
+            except: pass
+        if h.empty or bt == "WIG20.WA":
+            sp = fetch_stooq_price(bt)
+            if sp: h = pd.Series(sp, index=idx)
+        if not h.empty and not h.isnull().all():
+            cv = float(h.iloc[-1])
+            if cv > 0:
+                lp = db.query(LatestPrice).filter(LatestPrice.symbol == bt).first()
+                if not lp: lp = LatestPrice(symbol=bt); db.add(lp)
+                lp.price = cv; lp.currency = "INDEX" if bt.startswith("^") or "WIG" in bt else "USD"; lp.last_updated = datetime.utcnow()
+    xrm = {}
+    for o in db.query(OpenPosition).all(): xrm[to_yahoo_symbol(o.symbol)] = o.symbol
+    for c in db.query(ClosedPosition).all(): xrm[to_yahoo_symbol(c.symbol)] = c.symbol
+    for t in uts:
+        h = pd.Series(dtype=float)
+        if not data.empty and t in ats:
+            try:
+                if len(atf) > 1:
+                    if "Close" in data.columns: h = data["Close"][t]
+                    elif ("Close", t) in data.columns: h = data[("Close", t)]
+                else:
+                    if "Close" in data.columns: h = data["Close"]
+            except: pass
+        if (h.empty or h.isnull().all()) and t in ats:
+            sp = fetch_stooq_price(t)
+            if sp: h = pd.Series(sp, index=idx)
+        if not h.empty and not h.isnull().all():
+            cv = float(h.iloc[-1])
+            if cv > 0:
+                lp = db.query(LatestPrice).filter(LatestPrice.symbol == t).first()
+                if not lp: lp = LatestPrice(symbol=t); db.add(lp)
+                lp.price = cv; lp.currency = cm.get(t); lp.last_updated = datetime.utcnow()
+        if h.empty or h.isnull().all():
+            lp = db.query(LatestPrice).filter(LatestPrice.symbol == t).first()
+            if lp and lp.price: h = pd.Series(lp.price, index=idx)
+            else:
+                xs = xrm.get(t, t.replace(".WA", ".PL")); lop = db.query(OpenPosition).filter(OpenPosition.symbol == xs).first(); mp = lop.market_price if lop else 0.0
+                lcp = db.query(ClosedPosition).filter(ClosedPosition.symbol == xs).order_by(ClosedPosition.close_time.desc()).first(); cp = lcp.close_price if lcp else 0.0
+                if mp > 0: h = pd.Series(mp, index=idx)
+                elif cp > 0: h = pd.Series(cp, index=idx)
+                else: h = pd.Series(0.0, index=idx)
+        h = h.reindex(idx).ffill().bfill().fillna(0.0); ops[t] = h.round(6); c = cm[t]
+        if c != "PLN": ps[t] = (h * frs.get(c, 1.0)).round(6)
+        else: ps[t] = h.round(6)
+    try: db.commit()
+    except: db.rollback()
+    return ps.fillna(0.0), ops.fillna(0.0), cm, ws
 
-    if position_events:
-        quantities_df = build_quantities_frame(position_events, index)
-        price_df, original_price_df, fx_currency_map, warnings = build_price_frame(
-            quantities_df.columns.tolist(),
-            start_date,
-            end_date,
-        )
-        market_values = quantities_df * price_df
-        holdings_value = market_values.sum(axis=1)
-        current_holdings = summarize_current_holdings(
-            quantities_df,
-            price_df,
-            original_price_df,
-            fx_currency_map,
-        )
-    else:
-        quantities_df = pd.DataFrame(index=index)
-        price_df = pd.DataFrame(index=index)
-        original_price_df = pd.DataFrame(index=index)
-        warnings = []
-        holdings_value = pd.Series(0.0, index=index)
-        current_holdings = []
-
-    total_value = cash_series.add(holdings_value, fill_value=0.0)
-    profit_value = total_value.subtract(external_cash_series, fill_value=0.0)
-    result_df = pd.DataFrame(
-        {
-            "date": index.strftime("%Y-%m-%d"),
-            "cash": cash_series.round(2),
-            "holdingsValue": holdings_value.round(2),
-            "totalValue": total_value.round(2),
-            "externalCashFlow": external_cash_series.round(2),
-            "profitValue": profit_value.round(2),
-        }
-    )
-
-    summary = {
-        "startDate": result_df.iloc[0]["date"],
-        "endDate": result_df.iloc[-1]["date"],
-        "currentCash": round(float(cash_series.iloc[-1]), 2),
-        "currentHoldingsValue": round(float(holdings_value.iloc[-1]), 2),
-        "currentTotalValue": round(float(total_value.iloc[-1]), 2),
-        "currentProfitValue": round(float(profit_value.iloc[-1]), 2),
-        "netExternalCashFlow": round(float(external_cash_series.iloc[-1]), 2),
-        "currentProfitPercent": round(
-            (float(profit_value.iloc[-1]) / float(external_cash_series.iloc[-1])) * 100,
-            2,
-        )
-        if not math.isclose(float(external_cash_series.iloc[-1]), 0.0, abs_tol=1e-9)
-        else 0.0,
-        "peakValue": round(float(total_value.max()), 2),
-        "lowestValue": round(float(total_value.min()), 2),
-    }
-
-    benchmark_series, benchmark_warnings = build_benchmark_series(start_date, end_date, index, trade_cash_events)
-    warnings.extend(benchmark_warnings)
-
-    return {
-        "summary": summary,
-        "series": result_df.to_dict(orient="records"),
-        "holdings": current_holdings,
-        "benchmarks": benchmark_series,
-        "warnings": warnings,
-    }
-
-
-def build_quantities_frame(events: list[PositionEvent], index: pd.DatetimeIndex) -> pd.DataFrame:
-    tickers = sorted({event.yahoo_ticker for event in events})
-    quantities = pd.DataFrame(0.0, index=index, columns=tickers)
-    for event in events:
-        quantities.loc[pd.Timestamp(event.trade_date), event.yahoo_ticker] += event.quantity_delta
-    return quantities.cumsum()
-
-
-def build_price_frame(
-    yahoo_tickers: list[str],
-    start_date: date,
-    end_date: date,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], list[str]]:
-    index = pd.date_range(start=start_date, end=end_date, freq="D")
-    prices = pd.DataFrame(index=index)
-    original_prices = pd.DataFrame(index=index)
-    currency_map: dict[str, str] = {}
-    warnings: list[str] = []
-
-    for ticker in yahoo_tickers:
-        if not ticker:
-            continue
-
-        history = download_close_series(ticker, start_date, end_date)
-        if history.empty:
-            warnings.append(f"No price history found for {ticker}.")
-            prices[ticker] = 0.0
-            original_prices[ticker] = 0.0
-            currency_map[ticker] = guess_currency_from_symbol(ticker)
-            continue
-
-        currency = resolve_currency(ticker)
-        currency_map[ticker] = currency
-        history = history.reindex(index).ffill().fillna(0.0)
-        original_prices[ticker] = history.round(6)
-
-        if currency != "PLN":
-            fx_symbol = FX_SYMBOLS.get(currency)
-            if not fx_symbol:
-                warnings.append(f"No FX mapping configured for {ticker} currency {currency}.")
-                prices[ticker] = 0.0
-                continue
-
-            fx_history = download_close_series(fx_symbol, start_date, end_date)
-            if fx_history.empty:
-                warnings.append(f"No FX history found for currency {currency} used by {ticker}.")
-                prices[ticker] = 0.0
-                continue
-            fx_history = fx_history.reindex(index).ffill().bfill().fillna(0.0)
-            history = history * fx_history
-
-        prices[ticker] = history.round(6)
-
-    return prices.fillna(0.0), original_prices.fillna(0.0), currency_map, warnings
-
-
-def download_close_series(symbol: str, start_date: date, end_date: date) -> pd.Series:
-    end_plus_one = end_date + timedelta(days=1)
+def download_close_series(s, sd, ed) -> pd.Series:
     with without_dead_local_proxy():
-        try:
-            data = yf.download(
-                symbol,
-                start=start_date.isoformat(),
-                end=end_plus_one.isoformat(),
-                auto_adjust=False,
-                progress=False,
-                group_by="column",
-                threads=False,
-            )
-        except Exception:
-            return pd.Series(dtype=float)
-    if data is None or data.empty:
-        return pd.Series(dtype=float)
+        try: data = yf.download(s, start=sd.isoformat(), end=(ed + timedelta(days=1)).isoformat(), auto_adjust=False, progress=False, threads=False)
+        except: return pd.Series(dtype=float)
+    if data is None or data.empty: return pd.Series(dtype=float)
+    if isinstance(data.columns, pd.MultiIndex): cs = data["Close"].iloc[:, 0]
+    else: cs = data["Close"]
+    cs.index = pd.to_datetime(cs.index).tz_localize(None); return cs.astype(float).sort_index()
 
-    close_series: pd.Series
-    if isinstance(data.columns, pd.MultiIndex):
-        close_series = data["Close"].iloc[:, 0]
-    else:
-        close_series = data["Close"]
-    close_series.index = pd.to_datetime(close_series.index).tz_localize(None)
-    return close_series.astype(float).sort_index()
-
-
-def resolve_currency(symbol: str) -> str:
+def resolve_currency(s) -> str:
+    g = guess_currency_from_symbol(s)
+    if g != "USD": return g
     with without_dead_local_proxy():
-        ticker = yf.Ticker(symbol)
-
+        t = yf.Ticker(s)
         try:
-            fast_info = ticker.fast_info
-            if fast_info:
-                currency = fast_info.get("currency")
-                if currency:
-                    return str(currency).upper()
-        except Exception:
-            pass
+            fi = t.fast_info
+            if fi:
+                curr = fi.get("currency")
+                if curr: return str(curr).upper()
+        except: pass
+    return g
 
-        try:
-            info = ticker.info
-            currency = info.get("currency")
-            if currency:
-                return str(currency).upper()
-        except Exception:
-            pass
-
-    return guess_currency_from_symbol(symbol)
-
-
-def guess_currency_from_symbol(symbol: str) -> str:
-    upper_symbol = symbol.upper()
-    for suffix, currency in CURRENCY_SUFFIX_FALLBACK.items():
-        if upper_symbol.endswith(suffix):
-            return currency
+def guess_currency_from_symbol(s) -> str:
+    us = s.upper()
+    for sx, c in CURRENCY_SUFFIX_FALLBACK.items():
+        if us.endswith(sx): return c
     return "USD"
 
+def summarize_current_holdings(qdf, pdf, opdf, cm) -> list[dict[str, Any]]:
+    hs = []; lq = qdf.iloc[-1]; lps = pdf.iloc[-1] if not pdf.empty else pd.Series(dtype=float); lops = opdf.iloc[-1] if not opdf.empty else pd.Series(dtype=float)
+    for t, q in lq.items():
+        if math.isclose(float(q), 0.0, abs_tol=1e-9): continue
+        p = float(lps.get(t, 0.0)); op = float(lops.get(t, 0.0)); oc = cm.get(t, "PLN")
+        hs.append({"ticker": t, "quantity": round(float(q), 6), "pricePln": round(p, 2), "marketValuePln": round(p * float(q), 2), "priceOriginal": round(op, 4), "marketValueOriginal": round(op * float(q), 2), "originalCurrency": oc, "currency": oc, "insight": fetch_holding_insight(t)})
+    hs.sort(key=lambda x: x["marketValuePln"], reverse=True); return hs
 
-def summarize_current_holdings(
-    quantities_df: pd.DataFrame,
-    prices_df: pd.DataFrame,
-    original_prices_df: pd.DataFrame,
-    currency_map: dict[str, str],
-) -> list[dict[str, Any]]:
-    holdings: list[dict[str, Any]] = []
-    latest_quantities = quantities_df.iloc[-1]
-    latest_prices = prices_df.iloc[-1] if not prices_df.empty else pd.Series(dtype=float)
-    latest_original_prices = (
-        original_prices_df.iloc[-1] if not original_prices_df.empty else pd.Series(dtype=float)
-    )
+def build_benchmark_series(sd, ed, idx, tce, db) -> tuple[dict[str, Any], list[str]]:
+    bs = {}; ws = []; tcb = {}
+    for d, a in tce: tcb[d] = tcb.get(d, 0.0) + float(a)
+    for k, cfg in BENCHMARKS.items():
+        s = cfg["symbol"]; h = pd.Series(dtype=float)
+        if k == "wig20": h = fetch_stooq_history("wig20")
+        if h.empty: h = download_close_series(s, sd, ed)
+        if h.empty:
+            lp = db.query(LatestPrice).filter(LatestPrice.symbol == s).first()
+            if lp and lp.price: h = pd.Series(lp.price, index=idx)
+            else: ws.append(f"No benchmark history for {cfg['label']}"); continue
+        h = h.reindex(idx).ffill().bfill(); fp = float(h[h > 0].iloc[0]) if not h[h > 0].empty else 0.0
+        if math.isclose(fp, 0.0, abs_tol=1e-12): ws.append(f"Benchmark {cfg['label']} has no usable starting price."); continue
+        sh = 0.0; ni = 0.0; vs = []; ivs = []; pvs = []
+        for ts, p in h.items():
+            ea = tcb.get(ts.date(), 0.0); p = float(p)
+            if ea < 0: ia = -ea; sh += ia / p; ni += ia
+            elif ea > 0: ss = min(sh, ea / p); sh -= ss; ni -= min(ni, ea)
+            v = sh * p; vs.append(v); ivs.append(ni); pvs.append(v - ni)
+        fv = next((v for v in vs if not math.isclose(v, 0.0, abs_tol=1e-9)), 0.0)
+        rp = [((v / fv) - 1.0) * 100 if fv else 0.0 for v in vs]
+        pts = pd.DataFrame({"date": idx.strftime("%Y-%m-%d"), "value": pd.Series(vs, index=idx).round(2), "netInvested": pd.Series(ivs, index=idx).round(2), "profitValue": pd.Series(pvs, index=idx).round(2), "returnPercent": pd.Series(rp, index=idx).round(2)})
+        bs[k] = {"label": cfg["label"], "symbol": s, "series": pts.to_dict(orient="records")}
+    return bs, ws
 
-    for ticker, quantity in latest_quantities.items():
-        if math.isclose(float(quantity), 0.0, abs_tol=1e-9):
-            continue
-        price = float(latest_prices.get(ticker, 0.0))
-        original_price = float(latest_original_prices.get(ticker, 0.0))
-        original_currency = currency_map.get(ticker, "PLN")
-        holdings.append(
-            {
-                "ticker": ticker,
-                "quantity": round(float(quantity), 6),
-                "pricePln": round(price, 2),
-                "marketValuePln": round(price * float(quantity), 2),
-                "priceOriginal": round(original_price, 4),
-                "marketValueOriginal": round(original_price * float(quantity), 2),
-                "originalCurrency": original_currency,
-                "currency": original_currency,
-                "insight": fetch_holding_insight(ticker),
-            }
-        )
-
-    holdings.sort(key=lambda item: item["marketValuePln"], reverse=True)
-    return holdings
-
-
-def build_benchmark_series(
-    start_date: date,
-    end_date: date,
-    index: pd.DatetimeIndex,
-    trade_cash_events: list[tuple[date, float]],
-) -> tuple[dict[str, Any], list[str]]:
-    benchmarks: dict[str, Any] = {}
-    warnings: list[str] = []
-    trade_cash_by_date: dict[date, float] = {}
-    for event_date, amount in trade_cash_events:
-        trade_cash_by_date[event_date] = trade_cash_by_date.get(event_date, 0.0) + float(amount)
-
-    for key, config in BENCHMARKS.items():
-        history = download_close_series(config["symbol"], start_date, end_date)
-        if history.empty:
-            warnings.append(f"No benchmark history found for {config['label']} ({config['symbol']}).")
-            continue
-
-        history = history.reindex(index).ffill().bfill()
-        first_price = float(history[history > 0].iloc[0]) if not history[history > 0].empty else 0.0
-        if math.isclose(first_price, 0.0, abs_tol=1e-12):
-            warnings.append(f"Benchmark {config['label']} has no usable starting price.")
-            continue
-
-        shares = 0.0
-        net_invested = 0.0
-        values: list[float] = []
-        invested_values: list[float] = []
-        profit_values: list[float] = []
-
-        for timestamp, price in history.items():
-            event_amount = trade_cash_by_date.get(timestamp.date(), 0.0)
-            price = float(price)
-            if event_amount < 0:
-                invested_amount = -event_amount
-                shares += invested_amount / price
-                net_invested += invested_amount
-            elif event_amount > 0:
-                sell_shares = min(shares, event_amount / price)
-                shares -= sell_shares
-                net_invested -= min(net_invested, event_amount)
-
-            value = shares * price
-            values.append(value)
-            invested_values.append(net_invested)
-            profit_values.append(value - net_invested)
-
-        first_value = next((value for value in values if not math.isclose(value, 0.0, abs_tol=1e-9)), 0.0)
-        return_pct = [((value / first_value) - 1.0) * 100 if first_value else 0.0 for value in values]
-        points = pd.DataFrame(
-            {
-                "date": index.strftime("%Y-%m-%d"),
-                "value": pd.Series(values, index=index).round(2),
-                "netInvested": pd.Series(invested_values, index=index).round(2),
-                "profitValue": pd.Series(profit_values, index=index).round(2),
-                "returnPercent": pd.Series(return_pct, index=index).round(2),
-            }
-        )
-
-        benchmarks[key] = {
-            "label": config["label"],
-            "symbol": config["symbol"],
-            "series": points.to_dict(orient="records"),
-        }
-
-    return benchmarks, warnings
-
-
-def fetch_holding_insight(symbol: str) -> dict[str, Any]:
-    fallback = {
-        "name": symbol,
-        "sector": None,
-        "recommendation": None,
-        "recommendationMean": None,
-        "analystCount": None,
-        "targetMeanPrice": None,
-        "targetCurrency": None,
-        "source": "Yahoo Finance",
-        "asOf": None,
-        "summary": "Brak danych analitycznych z Yahoo Finance.",
-    }
-
-    fmp_insight = fetch_fmp_recommendation(symbol)
-    if fmp_insight:
-        return fmp_insight
-
-    with without_dead_local_proxy():
-        try:
-            info = yf.Ticker(symbol).info or {}
-        except Exception:
-            return fallback
-
-    recommendation = info.get("recommendationKey")
-    recommendation_mean = safe_float(info.get("recommendationMean"))
-    analyst_count = safe_int(info.get("numberOfAnalystOpinions"))
-    target_mean = safe_float(info.get("targetMeanPrice"))
-    name = info.get("shortName") or info.get("longName") or symbol
-    sector = info.get("sector")
-    currency = info.get("financialCurrency") or info.get("currency")
-
-    if recommendation:
-        summary = f"Consensus: {str(recommendation).replace('_', ' ')}"
-        if analyst_count:
-            summary += f" ({analyst_count} analysts)"
-        if target_mean:
-            summary += f", target {round(target_mean, 2)} {currency or ''}".rstrip()
-        summary += "."
-    else:
-        summary = "Brak consensusu buy/sell w Yahoo Finance."
-
-    return {
-        "name": name,
-        "sector": sector,
-        "recommendation": recommendation,
-        "recommendationMean": recommendation_mean,
-        "analystCount": analyst_count,
-        "targetMeanPrice": target_mean,
-        "targetCurrency": currency,
-        "source": "Yahoo Finance",
-        "asOf": None,
-        "summary": summary,
-    }
-
-
-def fetch_fmp_recommendation(symbol: str) -> dict[str, Any] | None:
-    api_key = os.environ.get("FMP_API_KEY")
-    if not api_key:
-        return None
-
-    fmp_symbol = to_plain_symbol(symbol)
-    url = f"https://financialmodelingprep.com/api/v3/analyst-stock-recommendations/{fmp_symbol}"
-    try:
-        response = httpx.get(url, params={"apikey": api_key}, timeout=8.0)
-        response.raise_for_status()
-        payload = response.json()
-    except Exception:
-        return None
-
-    if not isinstance(payload, list) or not payload:
-        return None
-
-    latest = payload[0]
-    if not isinstance(latest, dict):
-        return None
-
-    counts = {
-        "strong_buy": safe_int(latest.get("analystRatingsStrongBuy")) or 0,
-        "buy": safe_int(latest.get("analystRatingsbuy") or latest.get("analystRatingsBuy")) or 0,
-        "hold": safe_int(latest.get("analystRatingsHold")) or 0,
-        "sell": safe_int(latest.get("analystRatingsSell")) or 0,
-        "strong_sell": safe_int(latest.get("analystRatingsStrongSell")) or 0,
-    }
-    analyst_count = sum(counts.values()) or None
-    recommendation = infer_recommendation_from_counts(counts)
-    as_of = latest.get("date")
-
-    summary = f"FMP latest consensus: {recommendation.replace('_', ' ')}"
-    if analyst_count:
-        summary += f" ({analyst_count} ratings)"
-    if as_of:
-        summary += f", as of {as_of}"
-    summary += "."
-
-    return {
-        "name": symbol,
-        "sector": None,
-        "recommendation": recommendation,
-        "recommendationMean": None,
-        "analystCount": analyst_count,
-        "targetMeanPrice": None,
-        "targetCurrency": None,
-        "source": "Financial Modeling Prep",
-        "asOf": as_of,
-        "ratingsBreakdown": counts,
-        "summary": summary,
-    }
-
-
-def infer_recommendation_from_counts(counts: dict[str, int]) -> str:
-    weights = {
-        "strong_buy": 1,
-        "buy": 2,
-        "hold": 3,
-        "sell": 4,
-        "strong_sell": 5,
-    }
-    total = sum(counts.values())
-    if not total:
-        return "no_data"
-
-    score = sum(count * weights[key] for key, count in counts.items()) / total
-    if score <= 1.5:
-        return "strong_buy"
-    if score <= 2.5:
-        return "buy"
-    if score <= 3.5:
-        return "hold"
-    if score <= 4.5:
-        return "sell"
-    return "strong_sell"
-
-
-def to_plain_symbol(symbol: str) -> str:
-    return symbol.split(".")[0]
-
-
-def safe_float(value: Any) -> float | None:
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def safe_int(value: Any) -> int | None:
-    try:
-        if value is None:
-            return None
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
+def fetch_holding_insight(s): return {"name": s, "sector": None, "recommendation": None, "recommendationMean": None, "analystCount": None, "targetMeanPrice": None, "targetCurrency": None, "source": "Yahoo Finance (Disabled)", "asOf": None, "summary": "Analiza wyłączona czasowo."}
 
 @contextmanager
 def without_dead_local_proxy():
-    removed: dict[str, str] = {}
-    for env_name in PROXY_ENV_NAMES:
-        value = os.environ.get(env_name)
-        if value and "127.0.0.1:9" in value:
-            removed[env_name] = value
-            os.environ.pop(env_name, None)
-    try:
-        yield
+    r = {}
+    for e in PROXY_ENV_NAMES:
+        v = os.environ.get(e)
+        if v and "127.0.0.1:9" in v: r[e] = v; os.environ.pop(e, None)
+    try: yield
     finally:
-        for env_name, value in removed.items():
-            os.environ[env_name] = value
-
+        for e, v in r.items(): os.environ[e] = v
 
 app = create_app()

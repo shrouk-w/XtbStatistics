@@ -287,6 +287,22 @@ h2 {
   font-size: 13px;
   cursor: pointer;
 }
+
+.apiWarning {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+  cursor: default;
+}
+
+.apiWarning small {
+  display: block;
+  color: var(--muted);
+  font-size: 11.5px;
+}
 .statusError::before {
   content: "";
   width: 7px; height: 7px;
@@ -294,6 +310,7 @@ h2 {
   background: var(--loss);
   flex-shrink: 0;
 }
+.apiWarning::before { background: var(--warn); }
 
 /* ----------------------------------------------------------------
    KPI strip
@@ -1399,4 +1416,18 @@ tbody tr:hover td { background: var(--surface-2); }
   th, td { padding: 10px 12px; }
   .heroCard { padding: 16px; }
   .heroDropzone { padding: 24px 14px; }
+}
+
+.warningStack {
+    margin-top: 16px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+}
+
+.warningStack p {
+    margin: 4px 0;
+    font-size: 12px;
+    color: var(--gold);
 }

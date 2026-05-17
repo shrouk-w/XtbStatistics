@@ -215,6 +215,15 @@ export function App() {
 
       <ErrorBanner message={error} onDismiss={() => setError("")} />
 
+      {data?.warnings?.some((warning) => warning.startsWith("STOOQ_API_ERROR")) ? (
+        <div className="statusError apiWarning">
+          {data.warnings
+            .find((warning) => warning.startsWith("STOOQ_API_ERROR"))
+            .replace("STOOQ_API_ERROR: ", "")}
+          <small>Sprawdz README.md, aby dowiedziec sie jak odswiezyc klucz.</small>
+        </div>
+      ) : null}
+
       {data && showManualEntry ? (
         <ManualEntry
           manualType={manualType} setManualType={setManualType}
